@@ -166,11 +166,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const handleSelectModuleItem = (moduleId: ActiveModule) => {
     if (userRole === 'student' && typeof window !== 'undefined') {
       try {
-        if (moduleId === 'dashboard') {
-          sessionStorage.setItem('eduplay_student_explicit_dashboard', 'true');
-        } else {
-          sessionStorage.removeItem('eduplay_student_explicit_dashboard');
-        }
+        sessionStorage.setItem('eduplay_student_explicit_dashboard', 'true');
       } catch {}
     }
     onSelectModule(moduleId);
@@ -392,7 +388,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const effectiveTeacherRole = (userRole === 'admin' || teacherProfile.userRole === 'admin') ? 'admin' : userRole;
 
   const menuItems = userRole === 'student' ? studentMenuItems : teacherMenuItems;
-  const visibleItems = menuItems.filter(item => item.roles.includes(effectiveTeacherRole));
+  const visibleItems = userRole === 'student'
+    ? studentMenuItems
+    : menuItems.filter(item => item.roles.includes(effectiveTeacherRole));
 
   // Use profile name if present, never fall back to email prefix if profile has real name
   const effectiveTeacherName = teacherProfile?.name || resolveTeacherNameByEmail(
@@ -487,6 +485,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   Chọn chức năng để cùng học và rèn luyện
                 </p>
               </div>
+
+              {typeof window !== 'undefined' && window.location.search.includes('debug=1') && (
+                <div className="mb-2 p-2 bg-amber-50 border border-amber-300 rounded-xl text-[10px] text-amber-900 font-mono">
+                  <div><strong>Role:</strong> {userRole} (eff: {effectiveTeacherRole})</div>
+                  <div><strong>Class:</strong> {cleanStudentClass}</div>
+                  <div><strong>Menu Items:</strong> {visibleItems.length} items visible</div>
+                </div>
+              )}
 
               {/* Navigation Items with 3D depth & press effect */}
               <nav className="space-y-2" id="sidebar-navigation">
