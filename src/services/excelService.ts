@@ -1,0 +1,1533 @@
+import * as XLSX from 'xlsx';
+import { QuestionItem, ExamPaper, StudentRecord } from '../types';
+import { formatScore, formatTotalScore, roundTotalScore, formatSubmissionDateTime } from '../utils/scoreUtils';
+import { getExamCompletion } from './examCompletionService';
+import { getStudentsFromLocalStorage, generateDefaultClassRoster, getClassStudentCount } from './studentStorageService';
+import { formatStandardStudentCode, normalizeStudentCode } from './studentCode';
+import { sortStudentsByName } from '../utils/vietnameseNameSort';
+
+/**
+ * Utility helper to trigger binary .xlsx file download in the browser
+ */
+export function saveWorkbookAsExcel(workbook: XLSX.WorkBook, filename: string) {
+  // Ensure the filename strictly ends with .xlsx
+  const safeFilename = filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`;
+  XLSX.writeFile(workbook, safeFilename, { bookType: 'xlsx', type: 'binary' });
+}
+
+/**
+ * Set custom column widths for a worksheet
+ */
+export function setWorksheetColWidths(ws: XLSX.WorkSheet, colWidths: number[]) {
+  ws['!cols'] = colWidths.map((wch) => ({ wch }));
+}
+
+/* =========================================================================
+   1. QUẢN LÝ NGƯỜI DÙNG & HỌC SINH (Student & User Management Templates & Parser)
+   ========================================================================= */
+
+/**
+ * 9 Cột tiêu chuẩn cố định theo đúng cấu trúc tệp Excel chuẩn Dạy & Học Số PK Trực Khang:
+ * Cột A (index 0): STT
+ * Cột B (index 1): Mã HS (Tên đăng nhập) -> username / code
+ * Cột C (index 2): Mật khẩu đăng nhập -> password / pin
+ * Cột D (index 3): Họ và tên học sinh -> fullName / name
+ * Cột E (index 4): SĐDCN -> idCard / sddcn
+ * Cột F (index 5): Giới tính -> gender
+ * Cột G (index 6): Ngày sinh -> birthday / dob
+ * Cột H (index 7): Phụ huynh liên hệ -> parentName
+ * Cột I (index 8): Số điện thoại -> phone
+ */
+export const STANDARD_STUDENT_HEADERS = [
+  'STT',
+  'Mã HS (Tên đăng nhập)',
+  'Mật khẩu đăng nhập',
+  'Họ và tên học sinh',
+  'SĐDCN',
+  'Giới tính',
+  'Ngày sinh',
+  'Phụ huynh liên hệ',
+  'Số điện thoại'
+] as const;
+
+/**
+ * Tải File Excel Mẫu để Nhập Danh Sách Học Sinh (.xlsx chuẩn 9 cột cố định A -> I)
+ */
+export function downloadStudentImportTemplate(className: string = 'Lớp 5B') {
+  const wb = XLSX.utils.book_new();
+
+  // Prefix mã học sinh chuẩn theo khối và lớp (vd: 5b1, 5b2... hoặc 3a1, 3a2...)
+  const prefix = className.replace(/Lớp\s*/i, '').toLowerCase();
+
+  // Header 1: Bảng dữ liệu học sinh theo đúng 9 cột chuẩn A -> I khớp với bảng 5bbbb - Excel
+  const studentData = [
+    [...STANDARD_STUDENT_HEADERS],
+    [
+      1,
+      `${prefix}1`,
+      '123456',
+      'Hà Nhật An',
+      '036216020221',
+      'Nam',
+      '22/01/2016',
+      'Hà Văn Duy',
+      '0975283013'
+    ],
+    [
+      2,
+      `${prefix}2`,
+      '123456',
+      'Phạm Lê Khang An',
+      '036216010562',
+      'Nam',
+      '21/03/2016',
+      'Phạm Văn Lượng',
+      '0366589026'
+    ],
+    [
+      3,
+      `${prefix}3`,
+      '123456',
+      'Trần Gia An',
+      '036216013787',
+      'Nam',
+      '27/12/2016',
+      'Trần Văn Thiện',
+      '0388535226'
+    ],
+    [
+      4,
+      `${prefix}4`,
+      '123456',
+      'Hoàng Thùy Anh',
+      '036316004976',
+      'Nữ',
+      '04/05/2016',
+      'Hoàng Văn Lùng',
+      '0393747280'
+    ],
+    [
+      5,
+      `${prefix}5`,
+      '123456',
+      'Lê Trần Huyền Anh',
+      '036316012590',
+      'Nữ',
+      '27/09/2016',
+      'Lê Trần Quân',
+      '0834948486'
+    ],
+    [
+      6,
+      `${prefix}6`,
+      '123456',
+      'Đồng Gia Bảo',
+      '036216003660',
+      'Nam',
+      '22/09/2016',
+      'Đồng Văn Thuần',
+      '0397273958'
+    ],
+    [
+      7,
+      `${prefix}7`,
+      '123456',
+      'Dương Thị Thùy Chi',
+      '037316010503',
+      'Nữ',
+      '21/02/2016',
+      'Dương Ngọc Tuân',
+      '0374410275'
+    ],
+    [
+      8,
+      `${prefix}8`,
+      '123456',
+      'Mai Thành Danh',
+      '036216021141',
+      'Nam',
+      '16/09/2016',
+      'Mai Văn Thanh',
+      '0348872187'
+    ],
+    [
+      9,
+      `${prefix}9`,
+      '123456',
+      'Đoàn Đức Duy',
+      '036216000146',
+      'Nam',
+      '24/12/2016',
+      'Đoàn Văn Nghĩa',
+      '0335569002'
+    ],
+    [
+      10,
+      `${prefix}10`,
+      '123456',
+      'Đồng Tiến Đạt',
+      '036216012288',
+      'Nam',
+      '02/07/2016',
+      'Đồng Văn Nam',
+      '0985916620'
+    ]
+  ];
+
+  const wsStudents = XLSX.utils.aoa_to_sheet(studentData);
+  setWorksheetColWidths(wsStudents, [8, 24, 20, 26, 26, 12, 16, 24, 20]);
+  XLSX.utils.book_append_sheet(wb, wsStudents, `Danh Sách ${className}`);
+
+  // Sheet 2: Hướng dẫn nhập liệu
+  const instructionData = [
+    ['HƯỚNG DẪN ĐIỀN DỮ LIỆU FILE EXCEL NHẬP HỌC SINH - TRƯỜNG TH QUANG HƯNG PK1'],
+    [''],
+    ['Thứ tự cột', 'Tên tiêu đề cột', 'Ánh xạ hệ thống', 'Quy cách & Định dạng dữ liệu chuẩn'],
+    ['Cột A (0)', 'STT', 'stt', 'Số thứ tự học sinh trong danh sách (1, 2, 3...)'],
+    ['Cột B (1)', 'Mã HS (Tên đăng nhập)', 'username / code', `Mã tài khoản viết thường không dấu gồm tên lớp + STT (ví dụ: ${prefix}1, ${prefix}2, ..., ${prefix}39).`],
+    ['Cột C (2)', 'Mật khẩu đăng nhập', 'password / pin', 'Mật khẩu đăng nhập mặc định (ví dụ: 123456 hoặc mã PIN 4-6 chữ số).'],
+    ['Cột D (3)', 'Họ và tên học sinh', 'fullName / name', 'Họ tên đầy đủ có dấu của học sinh (ví dụ: Hà Nhật An).'],
+    ['Cột E (4)', 'SĐDCN', 'idCard / sddcn', '12 chữ số mã định danh cá nhân / CCCD của học sinh (định dạng văn bản).'],
+    ['Cột F (5)', 'Giới tính', 'gender', 'Giới tính học sinh: "Nam" hoặc "Nữ".'],
+    ['Cột G (6)', 'Ngày sinh', 'birthday / dob', 'Định dạng ngày/tháng/năm (dd/mm/yyyy), ví dụ: 22/01/2016.'],
+    ['Cột H (7)', 'Phụ huynh liên hệ', 'parentName', 'Họ và tên bố, mẹ hoặc người giám hộ đại diện.'],
+    ['Cột I (8)', 'Số điện thoại', 'phone', 'Số điện thoại phụ huynh nhận mã OTP và thông báo học tập.']
+  ];
+  const wsGuide = XLSX.utils.aoa_to_sheet(instructionData);
+  setWorksheetColWidths(wsGuide, [12, 26, 20, 70]);
+  XLSX.utils.book_append_sheet(wb, wsGuide, 'Hướng Dẫn Quy Chuẩn');
+
+  const cleanClassName = className.replace(/[\s\/:*?"<>|]+/g, '_');
+  saveWorkbookAsExcel(wb, `Mau_Nhap_Hoc_Sinh_${cleanClassName}.xlsx`);
+}
+
+/**
+ * Xuất danh sách tài khoản & mật khẩu cấp cho phụ huynh (.xlsx chuẩn 9 cột cố định A -> I)
+ */
+export function exportStudentCredentialsExcel(className: string, students: StudentRecord[]) {
+  const wb = XLSX.utils.book_new();
+
+  const dataRows: any[] = [
+    [...STANDARD_STUDENT_HEADERS]
+  ];
+
+  students.forEach((st, idx) => {
+    dataRows.push([
+      st.stt || (idx + 1),
+      st.username || st.code || `${className.replace(/Lớp\s*/i, '').toLowerCase()}${idx + 1}`,
+      st.password || st.pin || '123456',
+      st.fullName || st.name,
+      st.idCard || (st.sddcn ? `'${st.sddcn}` : ''),
+      st.gender || 'Nam',
+      st.birthday || st.dob || '01/01/2016',
+      st.parentName || 'Phụ huynh học sinh',
+      st.phone ? `'${st.phone}` : ''
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(dataRows);
+  setWorksheetColWidths(ws, [8, 24, 20, 26, 26, 12, 16, 24, 20]);
+  XLSX.utils.book_append_sheet(wb, ws, `Danh Sách ${className}`);
+
+  const cleanClassName = className.replace(/[\s\/:*?"<>|]+/g, '_');
+  saveWorkbookAsExcel(wb, `Danh_Sach_Tai_Khoan_HS_${cleanClassName}.xlsx`);
+}
+
+export interface ParseStudentResult {
+  success: boolean;
+  students: StudentRecord[];
+  totalCount: number;
+  className?: string;
+  error?: string;
+}
+
+/**
+ * Hàm phân tích ngày tháng từ ô Excel (hỗ trợ cả chuỗi dd/mm/yyyy, yyyy-mm-dd hoặc số serial Excel)
+ */
+function parseExcelDate(val: any): string {
+  if (!val) return '01/01/2016';
+  if (typeof val === 'number') {
+    // Excel serial date to JS Date
+    const jsDate = new Date(Math.round((val - 25569) * 86400 * 1000));
+    if (!isNaN(jsDate.getTime())) {
+      const d = String(jsDate.getDate()).padStart(2, '0');
+      const m = String(jsDate.getMonth() + 1).padStart(2, '0');
+      const y = jsDate.getFullYear();
+      return `${d}/${m}/${y}`;
+    }
+  }
+  const str = String(val).trim();
+  // Nếu đã ở dạng dd/mm/yyyy
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(str)) {
+    const parts = str.split('/');
+    return `${parts[0].padStart(2, '0')}/${parts[1].padStart(2, '0')}/${parts[2]}`;
+  }
+  // Nếu ở dạng yyyy-mm-dd
+  if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(str)) {
+    const parts = str.split('-');
+    return `${parts[2].padStart(2, '0')}/${parts[1].padStart(2, '0')}/${parts[0]}`;
+  }
+  return str;
+}
+
+/**
+ * Hàm xử lý file Excel (importStudentsFromExcel) đọc chính xác dữ liệu theo đúng thứ tự 9 cột:
+ * Cột A (index 0): STT
+ * Cột B (index 1): Mã HS (Tên đăng nhập) -> username / code
+ * Cột C (index 2): Mật khẩu đăng nhập -> password / pin
+ * Cột D (index 3): Họ và tên học sinh -> fullName / name
+ * Cột E (index 4): Số định danh (SĐCN/CCCD) / SĐDCN -> idCard / sddcn
+ * Cột F (index 5): Giới tính -> gender
+ * Cột G (index 6): Ngày sinh -> birthday / dob
+ * Cột H (index 7): Họ tên phụ huynh / Phụ huynh liên hệ -> parentName
+ * Cột I (index 8): Số điện thoại -> phone
+ */
+export function importStudentsFromExcel(
+  fileInput: ArrayBuffer | Uint8Array | any,
+  fallbackClass: string = 'Lớp 5B'
+): ParseStudentResult {
+  try {
+    let arrayBuffer: ArrayBuffer | Uint8Array;
+    if (fileInput instanceof ArrayBuffer || fileInput instanceof Uint8Array) {
+      arrayBuffer = fileInput;
+    } else if (fileInput?.buffer instanceof ArrayBuffer) {
+      arrayBuffer = fileInput.buffer;
+    } else {
+      return { success: false, students: [], totalCount: 0, error: 'Dữ liệu file không hợp lệ.' };
+    }
+
+    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+    if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+      return { success: false, students: [], totalCount: 0, error: 'File Excel không có sheet dữ liệu hợp lệ.' };
+    }
+
+    // Chọn sheet danh sách học sinh (ưu tiên sheet đầu tiên hoặc sheet chứa tên lớp)
+    const targetSheetName =
+      workbook.SheetNames.find((s) => !s.toLowerCase().includes('hướng dẫn')) || workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[targetSheetName];
+
+    // Chuyển sheet sang mảng 2 chiều
+    const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: '' });
+
+    if (!rawRows || rawRows.length === 0) {
+      return { success: false, students: [], totalCount: 0, error: 'File Excel trống.' };
+    }
+
+    // Cấu hình chỉ mục cột cố định mặc định theo chuẩn A -> I:
+    // Cột A (index 0): STT
+    // Cột B (index 1): Mã HS (Tên đăng nhập) -> username
+    // Cột C (index 2): Mật khẩu đăng nhập -> password
+    // Cột D (index 3): Họ và tên học sinh -> fullName
+    // Cột E (index 4): Số định danh (SĐCN/CCCD) -> idCard
+    // Cột F (index 5): Giới tính -> gender
+    // Cột G (index 6): Ngày sinh -> birthday
+    // Cột H (index 7): Họ tên phụ huynh -> parentName
+    // Cột I (index 8): Số điện thoại -> phone
+    let colIndices = {
+      stt: 0,
+      username: 1,
+      password: 2,
+      fullName: 3,
+      idCard: 4,
+      gender: 5,
+      birthday: 6,
+      parentName: 7,
+      phone: 8
+    };
+
+    let headerRowIdx = -1;
+
+    // Hàm chuẩn hóa chuỗi tiêu đề để so khớp linh hoạt không phân biệt hoa thường, dấu tiếng Việt
+    const norm = (s: any) =>
+      String(s || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[\s\(\)\/_\-\:\.]+/g, '');
+
+    for (let r = 0; r < Math.min(rawRows.length, 10); r++) {
+      const row = rawRows[r];
+      if (!Array.isArray(row)) continue;
+
+      let matchCount = 0;
+
+      row.forEach((cellVal, cIdx) => {
+        const cellNorm = norm(cellVal);
+        if (cellNorm === 'stt' || cellNorm === 'no' || cellNorm === 'thutu') {
+          colIndices.stt = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('mahs') ||
+          cellNorm.includes('tendangnhap') ||
+          cellNorm.includes('taikhoan') ||
+          cellNorm.includes('mshs') ||
+          cellNorm.includes('username')
+        ) {
+          colIndices.username = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('matkhau') ||
+          cellNorm.includes('pin') ||
+          cellNorm.includes('pass') ||
+          cellNorm.includes('password')
+        ) {
+          colIndices.password = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('hovaten') ||
+          cellNorm.includes('hoten') ||
+          cellNorm.includes('tenhocsinh') ||
+          cellNorm === 'ten' ||
+          cellNorm.includes('fullname')
+        ) {
+          colIndices.fullName = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('dinhdanh') ||
+          cellNorm.includes('sdcn') ||
+          cellNorm.includes('sddcn') ||
+          cellNorm.includes('cccd') ||
+          cellNorm.includes('cmnd') ||
+          cellNorm.includes('idcard')
+        ) {
+          colIndices.idCard = cIdx;
+          matchCount++;
+        } else if (cellNorm === 'gioitinh' || cellNorm === 'gender' || cellNorm === 'phai') {
+          colIndices.gender = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('ngaysinh') ||
+          cellNorm.includes('ns') ||
+          cellNorm.includes('birthday') ||
+          cellNorm.includes('dob') ||
+          cellNorm.includes('sinhngay')
+        ) {
+          colIndices.birthday = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('phuhuynh') ||
+          cellNorm.includes('hotenph') ||
+          cellNorm.includes('bame') ||
+          cellNorm.includes('giamho') ||
+          cellNorm.includes('parent')
+        ) {
+          colIndices.parentName = cIdx;
+          matchCount++;
+        } else if (
+          cellNorm.includes('dienthoai') ||
+          cellNorm.includes('sdt') ||
+          cellNorm.includes('phone') ||
+          cellNorm.includes('tel')
+        ) {
+          colIndices.phone = cIdx;
+          matchCount++;
+        }
+      });
+
+      if (matchCount >= 3) {
+        headerRowIdx = r;
+        break;
+      }
+    }
+
+    const startDataRow = headerRowIdx >= 0 ? headerRowIdx + 1 : 1;
+    const parsedStudents: StudentRecord[] = [];
+    const prefix = fallbackClass.replace(/Lớp\s*/i, '').toLowerCase();
+
+    for (let i = startDataRow; i < rawRows.length; i++) {
+      const row = rawRows[i];
+      if (!Array.isArray(row) || row.length === 0) continue;
+
+      const rawFullName = String(row[colIndices.fullName] || '').trim();
+      const rawUsername = String(row[colIndices.username] || '').trim();
+
+      // Bỏ qua dòng trống hoặc dòng hướng dẫn/tổng kết
+      if (!rawFullName && !rawUsername) continue;
+      if (rawFullName.toLowerCase().includes('hướng dẫn') || rawFullName.toLowerCase().includes('tổng cộng')) continue;
+
+      const sttNum =
+        parseInt(String(row[colIndices.stt] || parsedStudents.length + 1), 10) || parsedStudents.length + 1;
+      const usernameVal = rawUsername || `${prefix}${sttNum}`;
+      const passwordVal = String(row[colIndices.password] || '123456').replace(/^'/, '').trim() || '123456';
+      const fullNameVal = rawFullName || '';
+      const idCardVal = String(row[colIndices.idCard] || '').replace(/^'/, '').trim();
+      
+      const rawGender = String(row[colIndices.gender] || '').trim();
+      const genderVal: 'Nam' | 'Nữ' =
+        rawGender.toLowerCase() === 'nữ' || rawGender.toLowerCase() === 'nu' || rawGender.toLowerCase() === 'female'
+          ? 'Nữ'
+          : 'Nam';
+
+      const birthdayVal = parseExcelDate(row[colIndices.birthday]);
+      const parentNameVal = String(row[colIndices.parentName] || '').trim();
+      const phoneVal = String(row[colIndices.phone] || '').replace(/^'/, '').trim();
+      const emailVal = usernameVal ? `hs.${usernameVal.toLowerCase()}@quanghungpk1.edu.vn` : '';
+
+      // Chọn avatar ngẫu nhiên theo số thứ tự
+      const avatarId = (sttNum % 10) + 1;
+      const avatar = `https://images.unsplash.com/photo-${1535713875002 + avatarId}?w=100&auto=format&fit=crop`;
+
+      const studentItem: StudentRecord = {
+        id: `st-${prefix}-${sttNum}`,
+        stt: sttNum,
+        code: usernameVal,
+        username: usernameVal,
+        pin: passwordVal,
+        password: passwordVal,
+        name: fullNameVal,
+        fullName: fullNameVal,
+        sddcn: idCardVal,
+        idCard: idCardVal,
+        gender: genderVal,
+        dob: birthdayVal,
+        birthday: birthdayVal,
+        className: fallbackClass,
+        parentName: parentNameVal,
+        phone: phoneVal,
+        email: emailVal,
+        status: 'active',
+        conduct: 'Tốt',
+        avgScore: 0,
+        notes: 'Dữ liệu nhập từ file Excel chuẩn 9 cột',
+        avatar,
+        address: 'Thôn Quang Hưng, Xã Phú Ký'
+      };
+
+      parsedStudents.push(studentItem);
+    }
+
+    // Deduplicate parsed students array to ensure strict key uniqueness
+    const seenParsedIds = new Set<string>();
+    const seenParsedCodes = new Set<string>();
+    const deduplicatedParsed: StudentRecord[] = [];
+
+    parsedStudents.forEach((st) => {
+      const codeKey = (st.code || '').toLowerCase();
+      if (codeKey && seenParsedCodes.has(codeKey)) {
+        return;
+      }
+      if (codeKey) seenParsedCodes.add(codeKey);
+      deduplicatedParsed.push(st);
+    });
+
+    const finalResult = deduplicatedParsed.map((st, idx) => {
+      const stt = idx + 1;
+      const id = `st-${prefix}-${stt}`;
+      seenParsedIds.add(id);
+      return {
+        ...st,
+        id,
+        stt,
+        code: st.code || `${prefix}${stt}`,
+        username: st.username || `${prefix}${stt}`
+      };
+    });
+
+    return {
+      success: true,
+      students: finalResult,
+      totalCount: finalResult.length,
+      className: fallbackClass
+    };
+  } catch (err: any) {
+    console.error('Lỗi khi đọc file Excel:', err);
+    return {
+      success: false,
+      students: [],
+      totalCount: 0,
+      error: err?.message || 'Không thể xử lý file Excel.'
+    };
+  }
+}
+
+/**
+ * Wrapper parseStudentExcel gọi hàm importStudentsFromExcel
+ */
+export function parseStudentExcel(
+  fileBuffer: ArrayBuffer | Uint8Array,
+  fallbackClass: string = 'Lớp 5B'
+): ParseStudentResult {
+  return importStudentsFromExcel(fileBuffer, fallbackClass);
+}
+
+/* =========================================================================
+   2. NGÂN HÀNG CÂU HỎI (Question Bank Templates & Exporter)
+   ========================================================================= */
+
+/**
+ * Tải File Excel Mẫu để Nhập Ngân Hàng Câu Hỏi (.xlsx chuẩn)
+ */
+export function downloadQuestionBankTemplate(subject: string = 'Toán', grade: string = 'Khối 3') {
+  const wb = XLSX.utils.book_new();
+
+  const headers = [
+    'STT',
+    'Mã câu hỏi',
+    'Môn học',
+    'Khối lớp',
+    'Tên bài học / Chủ đề',
+    'Mức độ nhận thức',
+    'Loại câu hỏi',
+    'Nội dung câu hỏi',
+    'Lựa chọn A',
+    'Lựa chọn B',
+    'Lựa chọn C',
+    'Lựa chọn D',
+    'Đáp án đúng',
+    'Lời giải chi tiết sư phạm'
+  ];
+
+  const sampleRows = [
+    [
+      1,
+      'CH-TOAN3-001',
+      'Toán',
+      'Khối 3',
+      'Bài 1: Ôn tập các số đến 1000',
+      '1. Nhận biết',
+      'Trắc nghiệm đơn',
+      'Số gồm 4 trăm, 5 chục và 8 đơn vị được viết là:',
+      '458',
+      '485',
+      '548',
+      '845',
+      'A',
+      'Số gồm 4 trăm, 5 chục và 8 đơn vị là 458.'
+    ],
+    [
+      2,
+      'CH-TOAN3-002',
+      'Toán',
+      'Khối 3',
+      'Bài 2: Cộng trừ trong phạm vi 1000',
+      '2. Thông hiểu',
+      'Trắc nghiệm đơn',
+      'Kết quả của phép tính 245 + 321 là:',
+      '566',
+      '556',
+      '565',
+      '466',
+      'A',
+      'Ta có: 245 + 321 = 566.'
+    ],
+    [
+      3,
+      'CH-TV3-001',
+      'Tiếng Việt',
+      'Khối 3',
+      'Chủ điểm Mái ấm gia đình',
+      '1. Nhận biết',
+      'Trắc nghiệm đơn',
+      'Từ nào dưới đây chỉ tình cảm gia đình?',
+      'Yêu thương',
+      'Học tập',
+      'Chạy nhảy',
+      'Sách vở',
+      'A',
+      'Từ "Yêu thương" là từ chỉ tình cảm ruột thịt trong gia đình.'
+    ],
+    [
+      4,
+      'CH-TIN3-001',
+      'Tin học',
+      'Khối 3',
+      'Bài 1: Thông tin và quyết định',
+      '2. Thông hiểu',
+      'Đúng / Sai',
+      'Bộ phận nào của máy tính dùng để nhập chữ và số? (A: Bàn phím [Đúng], B: Màn hình [Sai])',
+      'Bàn phím máy tính',
+      'Màn hình máy tính',
+      'Thân máy',
+      'Chuột máy tính',
+      'A',
+      'Bàn phím là thiết bị thu nhận dữ liệu chữ và số.'
+    ],
+    [
+      5,
+      'CH-CN3-001',
+      'Công nghệ',
+      'Khối 3',
+      'Bài 1: Tự nhiên và công nghệ',
+      '3. Vận dụng',
+      'Trắc nghiệm đơn',
+      'Sản phẩm công nghệ nào trong gia đình giúp bảo quản thực phẩm tươi sống?',
+      'Tủ lạnh',
+      'Quạt điện',
+      'Tivi',
+      'Bếp gas',
+      'A',
+      'Tủ lạnh làm chậm sự phát triển của vi khuẩn giúp bảo quản thực phẩm an toàn.'
+    ]
+  ];
+
+  const wsData = XLSX.utils.aoa_to_sheet([headers, ...sampleRows]);
+  setWorksheetColWidths(wsData, [8, 16, 14, 12, 30, 18, 18, 45, 20, 20, 20, 20, 14, 40]);
+  XLSX.utils.book_append_sheet(wb, wsData, 'Ngân Hàng Câu Hỏi Mẫu');
+
+  // Sheet 2: Danh mục mã & Quy định chuẩn
+  const conventions = [
+    ['QUY ĐỊNH CHUẨN ĐỊNH DẠNG IMPORT NGÂN HÀNG CÂU HỎI - DẠY VÀ HỌC SỐ PK TRỰC KHANG'],
+    [''],
+    ['Cột dữ liệu', 'Giá trị hợp lệ được hệ thống nhận diện tự động'],
+    ['Mức độ nhận thức', '1. Nhận biết (hoặc "nhan_biet"), 2. Thông hiểu ("thong_hieu"), 3. Vận dụng ("van_dung"), 4. Vận dụng cao ("van_dung_cao")'],
+    ['Loại câu hỏi', 'Trắc nghiệm đơn, Chọn nhiều đáp án đúng, Đúng/Sai, Điền khuyết, Sắp xếp thứ tự, Phân loại, Tự luận'],
+    ['Đáp án đúng', 'Điền ký tự chữ cái đáp án đúng: A, B, C, D hoặc nội dung cụ thể'],
+    ['Lời giải chi tiết', 'Trình bày ngắn gọn, chuẩn mực sư phạm để AI và phần mềm hỗ trợ chấm và giải thích cho học sinh.']
+  ];
+  const wsGuide = XLSX.utils.aoa_to_sheet(conventions);
+  setWorksheetColWidths(wsGuide, [25, 75]);
+  XLSX.utils.book_append_sheet(wb, wsGuide, 'Quy Chuẩn Nhận Thức');
+
+  saveWorkbookAsExcel(wb, `Mau_Nhap_Ngan_Hang_Cau_Hoi_Truc_Khang.xlsx`);
+}
+
+/**
+ * Xuất toàn bộ ngân hàng câu hỏi ra file .xlsx chuẩn
+ */
+export function exportQuestionBankToExcel(questions: QuestionItem[], filename: string = 'Ngan_Hang_Cau_Hoi_Truc_Khang_Chuan.xlsx') {
+  const wb = XLSX.utils.book_new();
+
+  const headers = [
+    'STT',
+    'Mã câu hỏi',
+    'Môn học',
+    'Khối lớp',
+    'Mức độ nhận thức',
+    'Loại câu hỏi',
+    'Nội dung câu hỏi',
+    'Lựa chọn A / Các ý',
+    'Lựa chọn B',
+    'Lựa chọn C',
+    'Lựa chọn D',
+    'Đáp án đúng',
+    'Lời giải chi tiết sư phạm'
+  ];
+
+  const rows: any[] = [];
+  questions.forEach((q, idx) => {
+    const levelLabel =
+      q.level === 'nhan_biet' ? '1. Nhận biết' :
+      q.level === 'thong_hieu' ? '2. Thông hiểu' :
+      q.level === 'van_dung' ? '3. Vận dụng' : '4. Vận dụng cao';
+
+    const optA = q.options && q.options[0] ? q.options[0] : '';
+    const optB = q.options && q.options[1] ? q.options[1] : '';
+    const optC = q.options && q.options[2] ? q.options[2] : '';
+    const optD = q.options && q.options[3] ? q.options[3] : '';
+
+    rows.push([
+      idx + 1,
+      q.code || `CH-${idx + 1}`,
+      q.subject || 'Toán',
+      q.grade || 'Khối 3',
+      levelLabel,
+      q.type || 'Trắc nghiệm đơn',
+      q.content || '',
+      optA,
+      optB,
+      optC,
+      optD,
+      q.correctAnswer || 'A',
+      q.explanation || 'Lời giải chuẩn sư phạm.'
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  setWorksheetColWidths(ws, [8, 16, 14, 12, 18, 18, 45, 20, 20, 20, 20, 14, 40]);
+  XLSX.utils.book_append_sheet(wb, ws, 'Ngân Hàng Câu Hỏi');
+
+  saveWorkbookAsExcel(wb, filename);
+}
+
+/* =========================================================================
+   3. QUẢN LÝ ĐỀ KIỂM TRA & THI (Exam Management Templates & Exporter)
+   ========================================================================= */
+
+/**
+ * Tải File Excel Mẫu Ma Trận & Cấu Trúc Đề Thi (.xlsx chuẩn)
+ */
+export function downloadExamMatrixTemplate() {
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Ma trận đề thi mẫu
+  const matrixHeaders = [
+    ['MA TRẬN CẤU TRÚC ĐỀ KIỂM TRA ĐỊNH KỲ - TIỂU HỌC QUANG HƯNG PK1'],
+    ['Môn học: Toán', 'Khối lớp: Khối 3', 'Thời gian: 40 phút', 'Hình thức: Trắc nghiệm kết hợp tự luận'],
+    [''],
+    [
+      'STT',
+      'Chủ đề / Mạch kiến thức',
+      'Nhận biết (Câu)',
+      'Thông hiểu (Câu)',
+      'Vận dụng (Câu)',
+      'Vận dụng cao (Câu)',
+      'Tổng số câu',
+      'Tổng điểm',
+      'Tỉ lệ (%)'
+    ],
+    [1, '1. Số và phép tính trong phạm vi 1000', 2, 2, 1, 1, 6, 6.0, '60%'],
+    [2, '2. Hình học & Đo lường (Góc, độ dài, khối lượng)', 1, 1, 1, 0, 3, 3.0, '30%'],
+    [3, '3. Giải toán có lời văn thực tế', 1, 0, 0, 0, 1, 1.0, '10%'],
+    ['', 'TỔNG CỘNG MA TRẬN', 4, 3, 2, 1, 10, 10.0, '100%']
+  ];
+
+  const wsMatrix = XLSX.utils.aoa_to_sheet(matrixHeaders);
+  setWorksheetColWidths(wsMatrix, [8, 45, 18, 18, 18, 20, 15, 15, 15]);
+  XLSX.utils.book_append_sheet(wb, wsMatrix, 'Ma Trận Đề Thi');
+
+  // Sheet 2: Khung đề thi chi tiết
+  const examItems = [
+    [
+      'STT',
+      'Mã câu',
+      'Nội dung câu hỏi',
+      'Mức độ nhận thức',
+      'Lựa chọn A',
+      'Lựa chọn B',
+      'Lựa chọn C',
+      'Lựa chọn D',
+      'Đáp án đúng',
+      'Biểu điểm'
+    ],
+    [1, 'DT-01', 'Số lớn nhất có 3 chữ số khác nhau là:', 'Nhận biết', '987', '999', '102', '989', 'A', '1.0 điểm'],
+    [2, 'DT-02', 'Kết quả phép tính 300 + 40 + 5 là:', 'Nhận biết', '345', '354', '435', '543', 'A', '1.0 điểm'],
+    [3, 'DT-03', 'Mỗi túi có 5 quả cam. Hỏi 6 túi như thế có tất cả bao nhiêu quả cam?', 'Thông hiểu', '30 quả', '25 quả', '35 quả', '11 quả', 'A', '1.0 điểm'],
+    [4, 'DT-04', 'Tìm một số biết nếu lấy số đó chia cho 4 thì được 8 dư 3:', 'Vận dụng', '35', '32', '31', '36', 'A', '1.0 điểm'],
+    [5, 'DT-05', 'Bác An cưa một khúc gỗ dài 12m thành các đoạn 2m. Mỗi lần cưa mất 5 phút. Hỏi bác An cưa xong khúc gỗ hết bao nhiêu phút?', 'Vận dụng cao', '25 phút', '30 phút', '20 phút', '35 phút', 'A', '1.0 điểm']
+  ];
+  const wsExam = XLSX.utils.aoa_to_sheet(examItems);
+  setWorksheetColWidths(wsExam, [8, 14, 45, 18, 16, 16, 16, 16, 14, 14]);
+  XLSX.utils.book_append_sheet(wb, wsExam, 'Danh Sách Câu Hỏi');
+
+  saveWorkbookAsExcel(wb, 'Mau_Cau_Truc_Ma_Tran_De_Kiem_Tra.xlsx');
+}
+
+/**
+ * Xuất đề kiểm tra chi tiết ra file .xlsx đầy đủ 3 sheets (Nội dung, Đáp án & Hướng dẫn chấm, Ma trận)
+ */
+
+
+export function buildExamWorkbook(exam: ExamPaper): { workbook: XLSX.WorkBook; defaultFilename: string } {
+  const wb = XLSX.utils.book_new();
+
+  const numQuestions = exam.questions?.length || 5;
+  const questionHeaders: string[] = [];
+  for (let i = 1; i <= numQuestions; i++) {
+    questionHeaders.push(`Câu ${i}`);
+  }
+
+  const headersPage1 = [
+    'STT',
+    'Mã HS',
+    'Họ và tên',
+    'Trạng thái',
+    ...questionHeaders,
+    'Điểm',
+    'Điểm tối đa',
+    'Số lần làm',
+    'Thời gian nộp',
+    'Ghi chú chấm'
+  ];
+
+  const targetClasses = exam.targetClass ? exam.targetClass.split(',').map(c => c.trim()).filter(Boolean) : ['Lớp 3C'];
+
+  targetClasses.forEach(className => {
+    const cleanClass = className.replace(/^Lớp\s*/i, '').trim().toUpperCase();
+    const stdClassName = className.startsWith('Lớp ') ? className : `Lớp ${cleanClass}`;
+    const rawRoster = getStudentsFromLocalStorage(stdClassName) || generateDefaultClassRoster(stdClassName, 38);
+    const unSortedRoster = rawRoster.map((st, idx) => ({
+      ...st,
+      stt: st.stt || (idx + 1),
+      code: formatStandardStudentCode(st.code) || (st.code ? String(st.code).trim().toUpperCase() : `${cleanClass}26-27-${st.stt || (idx + 1)}`),
+      name: st.name || st.fullName || `Học sinh ${idx + 1}`,
+      fullName: st.fullName || st.name || `Học sinh ${idx + 1}`
+    }));
+    const classRoster = sortStudentsByName(unSortedRoster, 'asc').map((st, idx) => ({
+      ...st,
+      stt: idx + 1
+    }));
+
+    const completionStats = getExamCompletion(exam.id, className);
+    const subMap = new Map<string, any>();
+    completionStats.validSubmissions.forEach(sub => {
+      const codeKey = String(sub.standardizedStudentCode || sub.studentCode || sub.maHs || sub.code || '').toUpperCase();
+      if (codeKey) subMap.set(codeKey, sub);
+    });
+
+    const sheetDataPage1: any[][] = [headersPage1];
+
+    const headersPage2 = [
+      'STT',
+      'Mã HS',
+      'Họ và tên',
+      ...questionHeaders
+    ];
+
+    const correctAnswersRow = ['', '', 'Đáp án đúng'];
+    (exam.questions || []).forEach((q: any) => {
+      if (q.correctAnswer !== undefined) {
+        correctAnswersRow.push(String(q.correctAnswer));
+      } else if (q.matchingPairs && Array.isArray(q.matchingPairs)) {
+        correctAnswersRow.push(q.matchingPairs.map((p: any) => `${p.left || p.term} → ${p.right || p.definition}`).join('; '));
+      } else {
+        correctAnswersRow.push('A');
+      }
+    });
+
+    const sheetDataPage2: any[][] = [
+      headersPage2,
+      correctAnswersRow
+    ];
+
+    let totalClassScore = 0;
+    let submittedCount = 0;
+    const questionCorrectCounts = Array(numQuestions).fill(0);
+
+    classRoster.forEach((student, index) => {
+      const stt = student.stt || (index + 1);
+      const studentCode = student.code;
+      const sub = subMap.get(studentCode.toUpperCase());
+      const isSubmitted = Boolean(sub);
+
+      const rowPage1: any[] = [
+        stt,
+        studentCode,
+        student.fullName,
+        isSubmitted ? 'Đã nộp bài' : 'Chưa làm'
+      ];
+
+      const rowPage2: any[] = [
+        stt,
+        studentCode,
+        student.fullName
+      ];
+
+      let studentScore = 0;
+      for (let i = 0; i < numQuestions; i++) {
+        const qItem = exam.questions && exam.questions[i];
+        if (isSubmitted && sub?.answers) {
+          const ans = sub.answers[i];
+          let isCorrect = false;
+
+          if (ans !== undefined && ans !== null && qItem) {
+            const correctAnsStr = String(qItem.correctAnswer || '').trim().toUpperCase();
+            if (typeof ans === 'number') {
+              const letter = ['A', 'B', 'C', 'D'][ans] || String(ans);
+              rowPage2.push(letter);
+              const correctIdx = ['A', 'B', 'C', 'D'].indexOf(correctAnsStr);
+              isCorrect = letter === correctAnsStr || (correctIdx !== -1 && Number(ans) === correctIdx);
+            } else if (typeof ans === 'string') {
+              rowPage2.push(ans);
+              isCorrect = ans.trim().toUpperCase() === correctAnsStr;
+            } else if (qItem.matchingPairs) {
+              if (typeof ans === 'object' && ans !== null) {
+                const parts = Object.entries(ans).map(([k, v]) => `${k} → ${v}`).join('; ');
+                rowPage2.push(parts);
+              } else {
+                rowPage2.push(String(ans));
+              }
+              isCorrect = true;
+            } else {
+              rowPage2.push(String(ans));
+              isCorrect = Boolean(ans);
+            }
+          } else {
+            rowPage2.push('');
+          }
+
+          if (isCorrect) {
+            rowPage1.push('✓');
+            questionCorrectCounts[i]++;
+            studentScore += 1;
+          } else {
+            rowPage1.push('✗');
+          }
+        } else {
+          rowPage1.push('');
+          rowPage2.push('Chưa làm');
+        }
+      }
+
+      const rawScore = isSubmitted ? (sub.score !== undefined ? sub.score : studentScore) : 0;
+      if (isSubmitted) {
+        totalClassScore += rawScore;
+        submittedCount++;
+      }
+
+      rowPage1.push(
+        rawScore,
+        numQuestions,
+        isSubmitted ? (sub.attempts || 1) : 0,
+        isSubmitted ? formatSubmissionDateTime(sub.submittedAt || sub.submittedTime || '') : '',
+        isSubmitted && sub.needManual ? 'Cần chấm thủ công' : ''
+      );
+
+      sheetDataPage1.push(rowPage1);
+      sheetDataPage2.push(rowPage2);
+    });
+
+    const correctPctRow = [
+      '', '', 'Tỷ lệ đúng (%)', '',
+      ...questionCorrectCounts.map(c => submittedCount > 0 ? `${Math.round((c / submittedCount) * 100)}%` : '0%'),
+      submittedCount > 0 ? Number((totalClassScore / submittedCount).toFixed(2)) : 0,
+      numQuestions,
+      '', '', ''
+    ];
+    sheetDataPage1.push(correctPctRow);
+
+    const ws1 = XLSX.utils.aoa_to_sheet(sheetDataPage1);
+    const ws2 = XLSX.utils.aoa_to_sheet(sheetDataPage2);
+
+    ws1['!freeze'] = { xSplit: 3, ySplit: 1 };
+    ws2['!freeze'] = { xSplit: 3, ySplit: 2 };
+
+    const colWidths1 = [6, 14, 25, 15, ...Array(numQuestions).fill(8), 10, 10, 10, 20, 18];
+    setWorksheetColWidths(ws1, colWidths1);
+    const colWidths2 = [6, 14, 25, ...Array(numQuestions).fill(25)];
+    setWorksheetColWidths(ws2, colWidths2);
+
+    XLSX.utils.book_append_sheet(wb, ws1, `${className} - Kết quả`);
+    XLSX.utils.book_append_sheet(wb, ws2, `${className} - Đáp án chi tiết`);
+  });
+
+  const cleanExamName = (exam.title || 'De_Kiem_Tra').replace(/^(ĐỀ kiểm tra|Đề kiểm tra)\s*/i, '').replace(/[\s\/:*?"<>|]+/g, '_');
+  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const classNamesCleaned = targetClasses.map(c => c.replace(/[\s\/:*?"<>|]+/g, '_')).join('_');
+  const defaultFilename = `KetQua_${cleanExamName}_${classNamesCleaned}_${dateStr}.xlsx`;
+
+  return { workbook: wb, defaultFilename };
+}
+
+export function exportExamToExcel(exam: ExamPaper) {
+  const { workbook, defaultFilename } = buildExamWorkbook(exam);
+  saveWorkbookAsExcel(workbook, defaultFilename);
+}
+
+
+
+/* =========================================================================
+   4. QUẢN LÝ BÀI TẬP VỀ NHÀ (Assignment Management Templates & Exporter)
+   ========================================================================= */
+
+/**
+ * Tải File Excel Mẫu Giao Bài Tập Cho Học Sinh (.xlsx chuẩn)
+ */
+export function downloadAssignmentPlanTemplate(className: string = 'Lớp 3A') {
+  const wb = XLSX.utils.book_new();
+
+  const headers = [
+    'STT',
+    'Mã HS',
+    'Họ và tên học sinh',
+    'Tên bài rèn luyện / Phiếu học tập',
+    'Môn học',
+    'Khối lớp',
+    'Hạn nộp bài',
+    'Mục tiêu cần đạt',
+    'Ghi chú dặn dò phụ huynh'
+  ];
+
+  const prefix = className.replace(/Lớp\s*/i, '').toLowerCase();
+
+  const rows = [
+    [1, `${prefix}1`, 'Nguyễn Văn An', 'Bài 1: Tự nhiên và công nghệ', 'Công nghệ', 'Khối 3', '23:59 10/09/2026', 'Đạt từ 8.0 điểm trở lên', 'Nhắc nhở con tự giác hoàn thành trên máy tính/điện thoại'],
+    [2, `${prefix}2`, 'Trần Đức Bảo', 'Bài 1: Tự nhiên và công nghệ', 'Công nghệ', 'Khối 3', '23:59 10/09/2026', 'Đạt từ 8.0 điểm trở lên', 'Phụ huynh hỗ trợ chụp ảnh phiếu bài tập nếu có yêu cầu'],
+    [3, `${prefix}3`, 'Lê Minh Cường', 'Bài 1: Tự nhiên và công nghệ', 'Công nghệ', 'Khối 3', '23:59 10/09/2026', 'Đạt từ 8.0 điểm trở lên', 'Đọc kỹ câu hỏi trước khi chọn đáp án'],
+    [4, `${prefix}4`, 'Phạm Quỳnh Chi', 'Bài 1: Tự nhiên và công nghệ', 'Công nghệ', 'Khối 3', '23:59 10/09/2026', 'Đạt từ 8.0 điểm trở lên', 'Làm lại các câu sai để ghi nhớ bài học']
+  ];
+
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  setWorksheetColWidths(ws, [8, 14, 24, 35, 16, 12, 22, 28, 45]);
+  XLSX.utils.book_append_sheet(wb, ws, 'Danh Sách Giao Bài');
+
+  saveWorkbookAsExcel(wb, `Mau_Giao_Bai_Tap_Hoc_Sinh_${className.replace(/\s+/g, '')}.xlsx`);
+}
+
+/**
+ * Xuất Báo Cáo Theo Dõi Nộp Bài & Kết Quả Rèn Luyện (.xlsx chuẩn)
+ */
+export function exportAssignmentResultsExcel(
+  assignmentTitle: string,
+  className: string,
+  studentsList: any[],
+  customQuestionsCount?: number
+) {
+  const wb = XLSX.utils.book_new();
+
+  const nowStr = new Date().toLocaleString('vi-VN');
+
+  // Determine actual question count dynamically
+  let qCount = customQuestionsCount && customQuestionsCount > 0 ? customQuestionsCount : 0;
+  if (!qCount) {
+    qCount = Math.max(
+      5,
+      ...studentsList.map((st) => (Array.isArray(st.answers) ? st.answers.length : 0))
+    );
+  }
+
+  const questionHeaders: string[] = [];
+  for (let i = 1; i <= qCount; i++) {
+    questionHeaders.push(`Câu ${i}`);
+  }
+
+  // Column "Trạng thái nộp" is completely removed per user request
+  const headers = [
+    'STT',
+    'Mã HS',
+    'Họ và tên học sinh',
+    ...questionHeaders,
+    'Tổng điểm',
+    'Đánh giá AI',
+    'Thời gian nộp bài',
+    'Nhận xét sư phạm của Giáo viên'
+  ];
+
+  const sheetData: any[] = [
+    ['BÁO CÁO THEO DÕI NỘP BÀI RÈN LUYỆN & CHẤM ĐIỂM TỰ ĐỘNG'],
+    [`Bài tập: ${assignmentTitle}`],
+    [`Lớp phụ trách: ${className} | Tổng số: ${studentsList.length} học sinh | Thời gian xuất báo cáo: ${nowStr}`],
+    [],
+    headers
+  ];
+
+  studentsList.forEach((st, idx) => {
+    const isSubmitted =
+      st.status === 'submitted' ||
+      (st.submittedTime && st.submittedTime !== 'Chờ HS' && st.submittedTime !== '-');
+
+    const rowData: any[] = [
+      idx + 1,
+      st.code || '',
+      st.name || st.fullName || ''
+    ];
+
+    if (isSubmitted) {
+      // Question answers formatted as "✓" or "✗"
+      for (let q = 0; q < qCount; q++) {
+        const ans = Array.isArray(st.answers) ? st.answers[q] : undefined;
+        if (ans === 'pass' || ans === true || ans === 'correct' || ans === 1) {
+          rowData.push('✓');
+        } else if (ans === 'fail' || ans === false || ans === 'wrong' || ans === 0) {
+          rowData.push('✗');
+        } else {
+          rowData.push('');
+        }
+      }
+
+      // Total Score
+      const rawScore = st.totalScore !== undefined && st.totalScore !== null ? st.totalScore : st.score;
+      const displayScore = rawScore !== undefined && rawScore !== '-' && rawScore !== 'Chưa chấm' ? rawScore : '';
+      rowData.push(displayScore);
+
+      // AI Evaluation
+      const aiStatusStr =
+        st.aiStatus === 'pass'
+          ? 'Đạt yêu cầu'
+          : st.aiStatus === 'fail'
+          ? 'Cần ôn tập thêm'
+          : '';
+      rowData.push(aiStatusStr);
+
+      // Submission Time
+      const subTimeStr =
+        st.submittedTime && st.submittedTime !== 'Chờ HS' && st.submittedTime !== '-'
+          ? formatSubmissionDateTime(st.submittedTime)
+          : '';
+      rowData.push(subTimeStr);
+
+      // Teacher Note
+      let teacherNote = '';
+      if (displayScore !== '') {
+        const scoreNum = Number(displayScore);
+        if (!isNaN(scoreNum)) {
+          if (scoreNum >= 9) teacherNote = 'Xuất sắc, nắm chắc kiến thức bài học';
+          else if (scoreNum >= 7) teacherNote = 'Đạt yêu cầu, cần cẩn thận hơn ở câu vận dụng';
+          else if (scoreNum >= 5) teacherNote = 'Cần luyện tập thêm, giáo viên hỗ trợ chữa bài';
+          else teacherNote = 'Cần kèm cặp thêm ngoài giờ học';
+        }
+      }
+      rowData.push(teacherNote);
+    } else {
+      // Unsubmitted student: all question columns and result columns MUST be completely empty ""
+      for (let q = 0; q < qCount; q++) {
+        rowData.push('');
+      }
+      rowData.push(''); // Tổng điểm
+      rowData.push(''); // Đánh giá AI
+      rowData.push(''); // Thời gian nộp bài
+      rowData.push(''); // Nhận xét sư phạm
+    }
+
+    sheetData.push(rowData);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // Column width settings
+  const colWidths: number[] = [
+    8,  // STT
+    14, // Mã HS
+    26, // Họ và tên học sinh
+    ...Array(qCount).fill(10), // Câu 1..Câu N
+    14, // Tổng điểm
+    18, // Đánh giá AI
+    22, // Thời gian nộp bài
+    45  // Nhận xét sư phạm của Giáo viên
+  ];
+  setWorksheetColWidths(ws, colWidths);
+
+  // Merges for title banner
+  const lastColIdx = headers.length - 1;
+  ws['!merges'] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: lastColIdx } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: lastColIdx } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: lastColIdx } }
+  ];
+
+  // Apply cell styling for question symbols (✓: bold green #16A34A, ✗: bold red #DC2626)
+  const dataStartRowIdx = 4; // Row 5 in 1-based index (0: banner 1, 1: banner 2, 2: banner 3, 3: empty row, 4: headers) -> data begins at index 5
+  studentsList.forEach((_, idx) => {
+    const rIdx = 5 + idx;
+    for (let q = 0; q < qCount; q++) {
+      const cIdx = 3 + q;
+      const cellAddress = XLSX.utils.encode_cell({ r: rIdx, c: cIdx });
+      const cell = ws[cellAddress];
+      if (cell) {
+        if (cell.v === '✓') {
+          cell.s = {
+            font: { bold: true, color: { rgb: '16A34A' }, sz: 14, name: 'Calibri' },
+            alignment: { horizontal: 'center', vertical: 'center' }
+          };
+        } else if (cell.v === '✗') {
+          cell.s = {
+            font: { bold: true, color: { rgb: 'DC2626' }, sz: 14, name: 'Calibri' },
+            alignment: { horizontal: 'center', vertical: 'center' }
+          };
+        } else {
+          cell.s = {
+            alignment: { horizontal: 'center', vertical: 'center' }
+          };
+        }
+      }
+    }
+  });
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Ket_Qua_Ren_Luyen');
+
+  const cleanClass = className.replace(/[\s\/:*?"<>|]+/g, '_');
+  const cleanTitle = assignmentTitle.replace(/[\s\/:*?"<>|]+/g, '_');
+  saveWorkbookAsExcel(wb, `Ket_Qua_Ren_Luyen_${cleanClass}_${cleanTitle.substring(0, 30)}.xlsx`);
+}
+
+/* =========================================================================
+   7. HỌC BẠ SỐ & SỔ TỔNG KẾT (Sổ Nhận Xét & Sổ Tổng Kết Excel Exports)
+   ========================================================================= */
+
+interface SoNhanXetExportItem {
+  id: string;
+  code?: string;
+  lastName: string;
+  firstName: string;
+  dob: string;
+  isFemale: boolean;
+  className: string;
+  commentDetail?: {
+    correctCount: number;
+    totalQuestions: number;
+    strengths: string;
+    reminders: string;
+    overallDat: 'T' | 'HT' | 'CHT' | 'H' | 'C';
+    score: number;
+    hasCommented: boolean;
+    testTitle?: string;
+  };
+}
+
+interface SoTongKetExportItem {
+  id: string;
+  code?: string;
+  lastName: string;
+  firstName: string;
+  dob: string;
+  isFemale: boolean;
+  className: string;
+  homeroomTeacher?: string;
+  evaluations: Record<string, { dat: 'T' | 'HT' | 'CHT' | 'H' | 'C'; score: string }>;
+}
+
+/**
+ * Xuất Sổ Nhận Xét Học Sinh ra file .xlsx chuẩn
+ */
+export function exportSoNhanXetToExcel(params: {
+  students: SoNhanXetExportItem[];
+  grade: string;
+  className: string;
+  subject: string;
+  examType: string;
+  month: string;
+  testName: string;
+}) {
+  const { students, grade, className, subject, examType, month, testName } = params;
+  const wb = XLSX.utils.book_new();
+
+  // Helper to check if subject has numerical scores
+  const checkHasScore = (subjName: string): boolean => {
+    if (!subjName) return false;
+    const name = subjName.toLowerCase().trim();
+    if (
+      name.includes('đạo đức') ||
+      name.includes('tự nhiên và xã hội') ||
+      name.includes('tnxh') ||
+      name.includes('mĩ thuật') ||
+      name.includes('mỹ thuật') ||
+      name.includes('giáo dục thể chất') ||
+      name.includes('gdtc') ||
+      name.includes('thể dục') ||
+      name.includes('âm nhạc') ||
+      name.includes('trải nghiệm') ||
+      name.includes('hđtn')
+    ) {
+      return false;
+    }
+    return true;
+  };
+
+  const hasScore = checkHasScore(subject);
+
+  const displayClass = className === 'Tất cả Lớp' ? grade : className;
+  const titleRow1 = ['TRƯỜNG TIỂU HỌC TRỰC KHANG - BÁO CÁO SỔ NHẬN XẾT HỌC SINH'];
+  const titleRow2 = [`Khối/Lớp: ${displayClass} | Môn học: ${subject} | Loại KT: ${examType} | Thời gian: ${month} | Bài KT: ${testName}`];
+  const titleRow3 = [`Ngày xuất báo cáo: ${new Date().toLocaleDateString('vi-VN')} | Tổng số học sinh: ${students.length}`];
+  const emptyRow: string[] = [];
+
+  const headers = ['STT', 'Mã HS', 'Họ và tên', 'Ngày sinh', 'Lời nhận xét chi tiết (AI Sư phạm)', 'Đạt'];
+  if (hasScore) {
+    headers.push('Điểm');
+  }
+
+  const sheetData: any[][] = [
+    titleRow1,
+    titleRow2,
+    titleRow3,
+    emptyRow,
+    headers
+  ];
+
+  students.forEach((st, idx) => {
+    const hasComment = Boolean(st.commentDetail && st.commentDetail.hasCommented);
+    const comment = st.commentDetail;
+
+    const fullName = `${st.lastName} ${st.firstName}`.trim();
+    const genderTag = st.isFemale ? ' (Nữ)' : '';
+    const nameWithGender = `${fullName}${genderTag}`;
+    const studentCode = st.code || formatStandardStudentCode(st.id) || st.id || '';
+
+    const testTitle = comment?.testTitle || (testName !== 'Tất cả bài kiểm tra' ? testName : '');
+    const qCount = comment?.totalQuestions;
+    const testPrefix = testTitle ? `Đề: ${testTitle}${qCount ? ` (${qCount} câu)` : ''} — ` : '';
+
+    const commentText = hasComment && comment
+      ? `${testPrefix}Khen ngợi em đã hoàn thành đúng ${comment.correctCount}/${comment.totalQuestions} câu. Làm tốt các câu: ${comment.strengths}.${comment.reminders ? ` Cần ôn tập kỹ hơn ở ${comment.reminders}` : ''}`
+      : `Chưa được giao / chưa làm bài kiểm tra ${examType} môn ${subject}`;
+
+    const row = [
+      idx + 1,
+      studentCode,
+      nameWithGender,
+      st.dob || '',
+      commentText,
+      hasComment && comment?.overallDat ? comment.overallDat : 'Chưa có'
+    ];
+
+    if (hasScore) {
+      row.push(hasComment && comment?.score !== undefined ? formatTotalScore(comment.score) : '—');
+    }
+
+    sheetData.push(row);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // Auto Column Widths
+  const colWidths = [8, 16, 28, 14, 75, 10];
+  if (hasScore) colWidths.push(10);
+  setWorksheetColWidths(ws, colWidths);
+
+  XLSX.utils.book_append_sheet(wb, ws, 'SoNhanXet');
+
+  // Filename format: SoNhanXet_[Lớp][Tháng hoặc Kỳ][ngày xuất].xlsx
+  const cleanClass = displayClass.replace(/[\s\/:*?"<>|]+/g, '');
+  const cleanMonth = (month || 'Thang').replace(/[\s\/:*?"<>|]+/g, '');
+  const d = new Date();
+  const dateStr = `${String(d.getDate()).padStart(2, '0')}${String(d.getMonth() + 1).padStart(2, '0')}${d.getFullYear()}`;
+
+  const fileName = `SoNhanXet_${cleanClass}_${cleanMonth}_${dateStr}.xlsx`;
+  saveWorkbookAsExcel(wb, fileName);
+}
+
+/**
+ * Xuất Sổ Tổng Kết Kết Quả Giáo Dục Học Sinh ra file .xlsx chuẩn
+ */
+export function exportSoTongKetToExcel(params: {
+  students: SoTongKetExportItem[];
+  grade: string;
+  className: string;
+  semester: string;
+  subjects: string[];
+  homeroomTeacher?: string;
+}) {
+  const { students, grade, className, semester, subjects, homeroomTeacher } = params;
+  const isAllClasses = className === 'Tất cả Lớp';
+  const wb = XLSX.utils.book_new();
+
+  const checkHasScore = (subjName: string): boolean => {
+    if (!subjName) return false;
+    const name = subjName.toLowerCase().trim();
+    if (
+      name.includes('đạo đức') ||
+      name.includes('tự nhiên và xã hội') ||
+      name.includes('tnxh') ||
+      name.includes('mĩ thuật') ||
+      name.includes('mỹ thuật') ||
+      name.includes('giáo dục thể chất') ||
+      name.includes('gdtc') ||
+      name.includes('thể dục') ||
+      name.includes('âm nhạc') ||
+      name.includes('trải nghiệm') ||
+      name.includes('hđtn')
+    ) {
+      return false;
+    }
+    return true;
+  };
+
+  const displayClass = isAllClasses ? grade : className;
+  const titleRow1 = ['TRƯỜNG TIỂU HỌC QUANG HƯNG - BÁO CÁO SỔ TỔNG KẾT KẾT QUẢ GIÁO DỤC'];
+  const teacherSegment = !isAllClasses && homeroomTeacher ? ` | GVCN: ${homeroomTeacher}` : '';
+  const titleRow2 = [`Khối/Lớp: ${displayClass} | Học kỳ: ${semester}${teacherSegment} | Năm học: 2026 - 2027`];
+  const titleRow3 = [`Ngày xuất báo cáo: ${new Date().toLocaleDateString('vi-VN')} | Sĩ số: ${students.length} học sinh`];
+  const emptyRow: string[] = [];
+
+  const headers = isAllClasses
+    ? ['STT', 'Mã HS', 'Lớp', 'GVCN', 'Họ lót', 'Tên', 'Ngày sinh', 'Nữ']
+    : ['STT', 'Mã HS', 'Họ lót', 'Tên', 'Ngày sinh', 'Nữ'];
+
+  subjects.forEach((subj) => {
+    headers.push(`${subj} (Đạt)`);
+    if (checkHasScore(subj)) {
+      headers.push(`${subj} (Điểm)`);
+    }
+  });
+
+  const sheetData: any[][] = [
+    titleRow1,
+    titleRow2,
+    titleRow3,
+    emptyRow,
+    headers
+  ];
+
+  students.forEach((st, idx) => {
+    const studentCode = st.code || formatStandardStudentCode(st.id) || st.id || '';
+    const row: any[] = isAllClasses
+      ? [
+          idx + 1,
+          studentCode,
+          st.className || '',
+          st.homeroomTeacher || '',
+          st.lastName || '',
+          st.firstName || '',
+          st.dob || '',
+          st.isFemale ? 'v' : ''
+        ]
+      : [
+          idx + 1,
+          studentCode,
+          st.lastName || '',
+          st.firstName || '',
+          st.dob || '',
+          st.isFemale ? 'v' : ''
+        ];
+
+    subjects.forEach((subj) => {
+      const evalData = st.evaluations ? st.evaluations[subj] : undefined;
+      row.push(evalData && evalData.dat ? evalData.dat : '-');
+      if (checkHasScore(subj)) {
+        row.push(evalData && evalData.score ? formatTotalScore(evalData.score) : '-');
+      }
+    });
+
+    sheetData.push(row);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(sheetData);
+
+  // Column Widths
+  const colWidths = isAllClasses ? [8, 16, 12, 22, 18, 12, 14, 8] : [8, 16, 18, 12, 14, 8];
+  subjects.forEach((subj) => {
+    colWidths.push(14);
+    if (checkHasScore(subj)) {
+      colWidths.push(10);
+    }
+  });
+  setWorksheetColWidths(ws, colWidths);
+
+  XLSX.utils.book_append_sheet(wb, ws, 'SoTongKet');
+
+  // Filename format: SoTongKet_[Lớp][Tháng hoặc Kỳ][ngày xuất].xlsx
+  const cleanClass = displayClass.replace(/[\s\/:*?"<>|]+/g, '');
+  const cleanSemester = (semester || 'Ky').replace(/[\s\/:*?"<>|]+/g, '');
+  const d = new Date();
+  const dateStr = `${String(d.getDate()).padStart(2, '0')}${String(d.getMonth() + 1).padStart(2, '0')}${d.getFullYear()}`;
+
+  const fileName = `SoTongKet_${cleanClass}_${cleanSemester}_${dateStr}.xlsx`;
+  saveWorkbookAsExcel(wb, fileName);
+}
+
+export function exportAllStudentsLocalStorageBackup() {
+  try {
+    const studentDbRaw = localStorage.getItem('eduplay_students_database');
+    if (!studentDbRaw) {
+      console.warn('Không tìm thấy dữ liệu học sinh trong localStorage.');
+      return;
+    }
+    const studentDb = JSON.parse(studentDbRaw) || {};
+
+    // 1. Export JSON backup
+    const jsonBlob = new Blob([JSON.stringify(studentDb, null, 2)], { type: 'application/json' });
+    const jsonUrl = URL.createObjectURL(jsonBlob);
+    const jsonLink = document.createElement('a');
+    jsonLink.href = jsonUrl;
+    jsonLink.download = `Danh_Sach_Hoc_Sinh_Backup_${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(jsonLink);
+    jsonLink.click();
+    document.body.removeChild(jsonLink);
+
+    // 2. Export Excel backup
+    const wb = XLSX.utils.book_new();
+    Object.entries(studentDb).forEach(([className, students]) => {
+      if (Array.isArray(students) && students.length > 0) {
+        const sheetData = students.map((s: any, idx: number) => ({
+          'STT': idx + 1,
+          'Mã Học Sinh': s.code || s.id || '',
+          'Họ và Tên': s.name || s.fullName || '',
+          'Lớp': className,
+          'Giới Tính': s.gender || '',
+          'Ngày Sinh': s.dob || '',
+          'Phụ Huynh': s.parentName || '',
+          'Điện Thoại': s.phone || '',
+          'Email': s.email || '',
+          'SDDCN': s.sddcn || ''
+        }));
+        const ws = XLSX.utils.json_to_sheet(sheetData);
+        XLSX.utils.book_append_sheet(wb, ws, className.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 31));
+      }
+    });
+
+    saveWorkbookAsExcel(wb, `Toan_Bo_Hoc_Sinh_Backup_${new Date().toISOString().slice(0,10)}.xlsx`);
+  } catch (err) {
+    console.error('Lỗi xuất sao lưu:', err);
+  }
+}
+
+

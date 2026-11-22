@@ -1,0 +1,268 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAnonymousAuth() {
+      return request.auth != null &&
+             request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+
+    function isNonAnonymousSignedIn() {
+      return request.auth != null && !isAnonymousAuth();
+    }
+
+    function isAuthenticated() {
+      return isNonAnonymousSignedIn();
+    }
+
+    function isPublishedAndApprovedLesson(data) {
+      return (!('status' in data) || data.status == 'published') &&
+             (!('isApproved' in data) || data.isApproved == true);
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'admin@school.edu.vn' ||
+        request.auth.token.email == 'admin@eduplay.vn' ||
+        request.auth.token.email == 'thuthuthtk@gmail.com' ||
+        request.auth.token.email == 'vanquan18189@gmail.com' ||
+        request.auth.token.email.matches('(?i).*admin.*')
+      );
+    }
+
+    function isAuthorizedTeacher() {
+      return isAuthenticated() && (
+        isAdmin() ||
+        request.auth.token.email in [
+          'thuthuthtk@gmail.com',
+          'vanquan18189@gmail.com',
+          'hathiram@gmail.com',
+          'luuminh@gmail.com',
+          'buiyen@gmail.com',
+          'thanhthao@gmail.com',
+          'buituyentk@gmail.com',
+          'huongdiem18051995@gmail.com',
+          'tramduongtk@gmail.com',
+          'phamthanhthaotk@gmail.com',
+          'admin@school.edu.vn',
+          'admin@eduplay.vn'
+        ] ||
+        exists(/databases/$(database)/documents/teachers/$(request.auth.uid))
+      );
+    }
+
+    function isDocOwner(resData) {
+      return isAuthorizedTeacher() && (
+        isAdmin() ||
+        (resData.teacherEmail != null && resData.teacherEmail == request.auth.token.email) ||
+        (resData.teacherId != null && resData.teacherId == request.auth.uid) ||
+        (resData.createdByEmail != null && resData.createdByEmail == request.auth.token.email) ||
+        (resData.authorEmail != null && resData.authorEmail == request.auth.token.email) ||
+        (resData.userId != null && resData.userId == request.auth.uid)
+      );
+    }
+
+    // ELearning lessons collection:
+    // Anonymous / unauthenticated users can ONLY read published AND approved lessons (never write).
+    // Resource == null allows getDoc to distinguish non-existent lessons ("Không tìm thấy bài giảng")
+    // from existing unpublished/unapproved lessons (permission-denied -> "Bài giảng chưa được công bố").
+    match /elearning_lessons/{lessonId} {
+      allow get: if isNonAnonymousSignedIn() || resource == null || isPublishedAndApprovedLesson(resource.data);
+      allow list: if isNonAnonymousSignedIn() || isPublishedAndApprovedLesson(resource.data);
+      allow write: if isNonAnonymousSignedIn();
+    }
+
+    // Questions collection:
+    // Prevent anonymous question-bank scraping; allow anonymous read only for questions explicitly tied to
+    // an approved & published lessonId.
+    match /questions/{questionId} {
+      allow get: if isNonAnonymousSignedIn() || (
+        resource != null &&
+        resource.data.get('lessonId', '') != '' &&
+        exists(/databases/$(database)/documents/elearning_lessons/$(resource.data.lessonId)) &&
+        isPublishedAndApprovedLesson(get(/databases/$(database)/documents/elearning_lessons/$(resource.data.lessonId)).data)
+      );
+      allow list: if isNonAnonymousSignedIn() || (
+        resource.data.get('lessonId', '') != '' &&
+        exists(/databases/$(database)/documents/elearning_lessons/$(resource.data.lessonId)) &&
+        isPublishedAndApprovedLesson(get(/databases/$(database)/documents/elearning_lessons/$(resource.data.lessonId)).data)
+      );
+      allow write: if isNonAnonymousSignedIn();
+    }
+
+    // Assignments collection (public read-only get by ID for /assignment/[id] QR sharing; writes & submissions restricted)
+    match /assignments/{assignmentId} {
+      allow get: if true;
+      allow list, write: if !isAnonymousAuth();
+
+      match /{allSubpaths=**} {
+        allow read, write: if !isAnonymousAuth();
+      }
+    }
+
+    // Exams collection (public read-only get by ID for /exam/[id] QR sharing; writes & submissions restricted)
+    match /exams/{examId} {
+      allow get: if true;
+      allow list, write: if !isAnonymousAuth();
+
+      match /{allSubpaths=**} {
+        allow read, write: if !isAnonymousAuth();
+      }
+    }
+
+    match /exam_drafts/{draftId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /ai_matrix_exams/{examId} {
+      allow get: if true;
+      allow list, write: if !isAnonymousAuth();
+    }
+
+    match /exam_progress/{progressId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    // ELearning assignments & student progress
+    match /assigned_elearning/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /elearning_assignments/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /elearning_student_progress/{progressId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    // Games & Quizzis collections (public read-only get by ID for /game/[id] QR sharing; writes restricted)
+    match /games/{gameId} {
+      allow get: if true;
+      allow list, write: if !isAnonymousAuth();
+    }
+
+    match /quizzis/{quizId} {
+      allow get: if true;
+      allow list, write: if !isAnonymousAuth();
+    }
+
+    match /quizzi_games/{quizId} {
+      allow get: if true;
+      allow list, write: if isNonAnonymousSignedIn();
+    }
+
+    match /ai_game_quotas/{quotaId} {
+      allow read, write: if isNonAnonymousSignedIn();
+    }
+
+    // Live Quiz Sessions collection (interactive student join)
+    match /quiz_live_sessions/{sessionId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    // Teachers collection (Restricted to authorized teachers/admins)
+    match /teachers/{teacherId} {
+      allow read: if isAuthorizedTeacher();
+      allow create: if isAdmin();
+      allow update: if isAuthorizedTeacher() && (
+        isAdmin() ||
+        (resource.data.email != null && resource.data.email == request.auth.token.email) ||
+        (resource.data.id != null && request.auth.token.email != null)
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Users collection (Restricted to authorized teachers/admins - students cannot read)
+    match /users/{userId} {
+      allow read: if isAuthorizedTeacher();
+      allow create, update: if isAuthorizedTeacher();
+      allow delete: if isAdmin();
+    }
+
+    // Departments & teacher groups
+    match /to_chuyen_mon/{deptId} {
+      allow read: if !isAnonymousAuth();
+      allow write: if isAuthorizedTeacher();
+    }
+
+    match /departments/{deptId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /teacher_groups/{groupId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    // Class rosters, students, classes, and score records
+    match /class_rosters/{rosterId} {
+      allow read, write: if !isAnonymousAuth();
+
+      match /{allSubpaths=**} {
+        allow read, write: if !isAnonymousAuth();
+      }
+    }
+
+    match /students/{studentId} {
+      allow read, write: if !isAnonymousAuth();
+
+      match /{allSubpaths=**} {
+        allow read, write: if !isAnonymousAuth();
+      }
+    }
+
+    match /classes/{classId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /student_enrollments/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /student_results/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /student_year_end_results/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /score_records/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /deleted_submissions_backup/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    // Notifications, activity logs & settings
+    match /notifications/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /activityLogs/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /settings/{settingId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /app_settings/{settingId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /system_settings/{settingId} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    match /_system_check_/{id} {
+      allow read, write: if !isAnonymousAuth();
+    }
+
+    // Deny all other paths by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

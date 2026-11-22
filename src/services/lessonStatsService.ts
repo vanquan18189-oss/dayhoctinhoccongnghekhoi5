@@ -1,0 +1,428 @@
+import { StudentRecord } from '../types';
+import { getAllStudentsFromLocalStorage, getStudentsFromLocalStorage, getCurrentActiveAcademicYear, getStudentClassInfo } from './studentStorageService';
+import { getLocalCachedAssignedELearning } from './elearningAssignmentService';
+import { getStudentLessonProgress, ELEARNING_STUDENT_PROGRESS_COLLECTION, getUnifiedStudentLessonProgress } from '../components/modules/LessonFlowController';
+import { Student5EProgress, StatsOverview, Activity5EStats, ActivityDetail, ActivityStatus } from '../components/modules/stats/types';
+import { evaluateStudentLessonRating } from './lessonRatingService';
+import { db } from '../firebaseConfig';
+import { collection, getDocs } from 'firebase/firestore';
+
+/**
+ * Fetch and cache Firestore lesson progress records into localStorage for instant synchronous stats calculation
+ */
+export async function fetchAndCacheFirestoreLessonProgress(lessonId: string): Promise<void> {
+  if (!db || !lessonId) return;
+  try {
+    const colRef = collection(db, ELEARNING_STUDENT_PROGRESS_COLLECTION);
+    const snap = await getDocs(colRef);
+    snap.forEach(docSnap => {
+      const data = docSnap.data();
+      if (data && data.lessonId) {
+        const dLessonId = String(data.lessonId).toLowerCase();
+        const targetId = String(lessonId).toLowerCase();
+        if (dLessonId === targetId || dLessonId.includes(targetId) || targetId.includes(dLessonId)) {
+          const studentId = data.studentId || docSnap.id.split('___')[0];
+          if (studentId) {
+            const key = `viet_elearning_student_progress_${studentId}_${data.lessonId}`;
+            const altKey = `viet_elearning_student_progress_${studentId}_${lessonId}`;
+            try {
+              localStorage.setItem(key, JSON.stringify(data));
+              localStorage.setItem(altKey, JSON.stringify(data));
+            } catch {}
+          }
+        }
+      }
+    });
+  } catch (err) {
+    console.warn('Failed to fetch/cache firestore lesson progress:', err);
+  }
+}
+
+/**
+ * Helper to calculate stats from students
+ */
+export function calculateStatsOverview(students: Student5EProgress[]): StatsOverview {
+  // Guarantee calculation strictly on unique students (not click/visit counts)
+  const uniqueStudentsMap = new Map<string, Student5EProgress>();
+  students.forEach(s => {
+    const key = (s.studentId || s.studentCode || `${s.className}-${s.stt}`).trim().toLowerCase();
+    if (!uniqueStudentsMap.has(key)) {
+      uniqueStudentsMap.set(key, s);
+    } else {
+      const existing = uniqueStudentsMap.get(key)!;
+      if (s.progressPct > existing.progressPct) {
+        uniqueStudentsMap.set(key, s);
+      }
+    }
+  });
+
+  const uniqueStudents = Array.from(uniqueStudentsMap.values());
+  const total = uniqueStudents.length;
+  if (total === 0) {
+    return {
+      totalStudents: 0,
+      completedCount: 0,
+      completedPct: 0,
+      inProgressCount: 0,
+      inProgressPct: 0,
+      notStartedCount: 0,
+      notStartedPct: 0,
+      avgProgressPct: 0
+    };
+  }
+
+  const completed = uniqueStudents.filter(s => s.progressPct >= 100).length;
+  const inProgress = uniqueStudents.filter(s => s.progressPct > 0 && s.progressPct < 100).length;
+  const notStarted = uniqueStudents.filter(s => s.progressPct === 0).length;
+  const sumProgress = uniqueStudents.reduce((acc, s) => acc + s.progressPct, 0);
+  const avg = Math.round(sumProgress / total);
+
+  return {
+    totalStudents: total,
+    completedCount: completed,
+    completedPct: Math.round((completed / total) * 100),
+    inProgressCount: inProgress,
+    inProgressPct: Math.round((inProgress / total) * 100),
+    notStartedCount: notStarted,
+    notStartedPct: Math.round((notStarted / total) * 100),
+    avgProgressPct: avg
+  };
+}
+
+/**
+ * Helper to calculate stats for the 5 5E activities
+ */
+export function calculate5EActivityStats(students: Student5EProgress[]): Activity5EStats[] {
+  const uniqueStudentsMap = new Map<string, Student5EProgress>();
+  students.forEach(s => {
+    const key = (s.studentId || s.studentCode || `${s.className}-${s.stt}`).trim().toLowerCase();
+    if (!uniqueStudentsMap.has(key)) {
+      uniqueStudentsMap.set(key, s);
+    } else {
+      const existing = uniqueStudentsMap.get(key)!;
+      if (s.progressPct > existing.progressPct) {
+        uniqueStudentsMap.set(key, s);
+      }
+    }
+  });
+
+  const uniqueStudents = Array.from(uniqueStudentsMap.values());
+  const total = uniqueStudents.length;
+  const activities: { key: 'engage' | 'explore' | 'explain' | 'elaborate' | 'evaluate'; name: string; stepCode: string }[] = [
+    { key: 'engage', name: 'Khởi động', stepCode: 'Engage' },
+    { key: 'explore', name: 'Khám phá', stepCode: 'Explore' },
+    { key: 'explain', name: 'Luyện tập', stepCode: 'Explain' },
+    { key: 'elaborate', name: 'Vận dụng', stepCode: 'Elaborate' },
+    { key: 'evaluate', name: 'Đánh giá', stepCode: 'Evaluate' }
+  ];
+
+  return activities.map(act => {
+    const completedCount = uniqueStudents.filter(s => s[act.key].status === 'completed').length;
+    const completedPct = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+    return {
+      key: act.key,
+      name: act.name,
+      stepCode: act.stepCode,
+      completedCount,
+      totalStudents: total,
+      completedPct
+    };
+  });
+}
+
+/**
+ * Helper to format ISO date string into DD/MM/YYYY
+ */
+function formatActiveDate(isoString?: string): string {
+  if (!isoString) return '';
+  try {
+    const d = new Date(isoString);
+    if (!isNaN(d.getTime())) {
+      const day = d.getDate().toString().padStart(2, '0');
+      const month = (d.getMonth() + 1).toString().padStart(2, '0');
+      const year = d.getFullYear();
+      return `${day}/${month}/${year}`;
+    }
+  } catch {}
+  return '';
+}
+
+/**
+ * Helper to fetch real student lesson progress checking multiple identifier fallbacks
+ */
+function getRealStudentLessonProgress(student: StudentRecord, lessonId: string, academicYear?: string): any | null {
+  if (!student || !lessonId) return null;
+  const activeYear = academicYear || getCurrentActiveAcademicYear();
+  const primaryId = student.sddcn || student.id || student.code || 'u-4';
+  const unified = getUnifiedStudentLessonProgress(primaryId, lessonId, student);
+  if (unified.data) {
+    if (!unified.data.academicYear || unified.data.academicYear === activeYear) {
+      return unified.data;
+    }
+  }
+
+  const identifiers = [
+    student.sddcn,
+    student.studentPersistentId,
+    student.id,
+    student.code,
+    student.username,
+    student.stt && student.className ? `st-${student.className.replace(/\s+/g, '').toLowerCase()}-${student.stt}` : null
+  ].filter(Boolean) as string[];
+
+  const lessonVariants = Array.from(new Set([
+    lessonId,
+    lessonId.toLowerCase(),
+    lessonId.replace(/^les-/i, ''),
+    lessonId.replace(/[^a-zA-Z0-9_-]/g, '_')
+  ].filter(Boolean)));
+
+  for (const id of identifiers) {
+    for (const lVar of lessonVariants) {
+      const prog = getStudentLessonProgress(id, lVar);
+      if (prog) {
+        if (prog.academicYear && prog.academicYear !== activeYear) {
+          continue;
+        }
+        return prog;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Retrieve genuine 5E progress for real students of a lesson based on actual class assignments and database records
+ */
+export function getLessonStudentsProgressData(
+  lessonId: string,
+  lessonTitle: string,
+  gradeStr: string,
+  academicYear?: string
+): {
+  students: Student5EProgress[];
+  targetClasses: string[];
+  assignedDateStr?: string;
+} {
+  const activeYear = academicYear || getCurrentActiveAcademicYear();
+  const cleanLessonId = (lessonId || '').toLowerCase().trim();
+  const cleanTitle = (lessonTitle || '').toLowerCase().trim();
+
+  // 1. Check if this lesson has assigned info in elearningAssignmentService
+  const assignedList = getLocalCachedAssignedELearning();
+  const matchedAssignments = assignedList.filter(a => {
+    const aLessonId = (a.lessonId || a.id || '').toLowerCase().trim();
+    const aTitle = (a.lessonTitle || a.title || '').toLowerCase().replace(/^e-learning:\s*/i, '').trim();
+    return (
+      (cleanLessonId && (aLessonId === cleanLessonId || a.id?.toLowerCase().trim() === cleanLessonId)) ||
+      (cleanTitle && (aTitle === cleanTitle || aTitle.includes(cleanTitle) || cleanTitle.includes(aTitle)))
+    );
+  });
+
+  let targetClasses: string[] = [];
+  let assignedDateStr: string = '';
+
+  if (matchedAssignments.length > 0) {
+    matchedAssignments.forEach(a => {
+      if (a.targetClass && !targetClasses.includes(a.targetClass)) {
+        targetClasses.push(a.targetClass);
+      }
+      if (a.assignedAt && !assignedDateStr) {
+        assignedDateStr = a.assignedAt;
+      }
+    });
+  }
+
+  const allDb = getAllStudentsFromLocalStorage();
+
+  // 2. If no explicit assignment found, deduce from gradeStr or use the first available matching class
+  if (targetClasses.length === 0) {
+    const gradeMatch = (gradeStr || lessonTitle || '').match(/\d+/);
+    const gradeNum = gradeMatch ? gradeMatch[0] : '5';
+    
+    // Find class that matches the grade number (e.g. "Lớp 5C", "Lớp 5B", "Lớp 5A")
+    const matchingClassKeys = Object.keys(allDb).filter(cls => cls.includes(gradeNum));
+    if (matchingClassKeys.length > 0) {
+      targetClasses = [matchingClassKeys[0]]; // Take only the specific class of that grade
+    } else {
+      const firstClassKey = Object.keys(allDb)[0] || 'Lớp 5C';
+      targetClasses = [firstClassKey];
+    }
+  }
+
+  // 3. Fetch real students strictly belonging to the assigned classes (deduplicated by unique student identity)
+  const rawStudents: StudentRecord[] = [];
+  const seenStudentIds = new Set<string>();
+
+  // Ensure unique target classes
+  const uniqueTargetClasses = Array.from(new Set(targetClasses.map(c => c.trim()).filter(Boolean)));
+
+  uniqueTargetClasses.forEach(cls => {
+    const list = allDb[cls] || getStudentsFromLocalStorage(cls);
+    if (Array.isArray(list)) {
+      list.forEach(st => {
+        const idKey = (st.sddcn || st.id || st.code || st.username || `${cls}-${st.stt}`).trim().toLowerCase();
+        if (!seenStudentIds.has(idKey)) {
+          seenStudentIds.add(idKey);
+          rawStudents.push({
+            ...st,
+            className: st.className || cls
+          });
+        }
+      });
+    }
+  });
+
+  // 4. Map real students to authentic 5E progress records
+  const mappedStudents: Student5EProgress[] = rawStudents.map((st, idx) => {
+    const classInfo = getStudentClassInfo(st.sddcn || st.id, activeYear);
+    const resolvedClassName = classInfo?.className || st.className || targetClasses[0] || 'Lớp 3C';
+    const resolvedDisplayCode = classInfo?.displayCode || st.code || `HS${idx + 1}`;
+
+    const prog = getRealStudentLessonProgress(st, lessonId, activeYear);
+
+    // Activity 1: Khởi động (Engage)
+    const isEngageDone = Boolean(prog?.engageViewed);
+    const engage: ActivityDetail = {
+      status: isEngageDone ? 'completed' : 'not_started',
+      label: 'Khởi động',
+      completedAt: isEngageDone && prog?.updatedAt ? formatActiveDate(prog.updatedAt) : undefined,
+      score: isEngageDone ? 'Hoàn thành' : undefined
+    };
+
+    // Activity 2: Khám phá (Explore)
+    const hasExploreScore = typeof prog?.exploreAccuracy === 'number' && !isNaN(prog.exploreAccuracy);
+    const isExploreDone = Boolean(prog?.exploreCompleted || hasExploreScore);
+    const explore: ActivityDetail = {
+      status: isExploreDone ? 'completed' : (prog?.exploreProgress ? 'in_progress' : 'not_started'),
+      label: 'Khám phá',
+      completedAt: isExploreDone && prog?.updatedAt ? formatActiveDate(prog.updatedAt) : undefined,
+      score: hasExploreScore ? `${prog.exploreAccuracy}% đúng` : (isExploreDone ? 'Xem hết video' : undefined)
+    };
+
+    // Activity 3: Luyện tập (Explain / Elaborate)
+    const hasElaborateScore = typeof prog?.elaborate?.score === 'number' || typeof prog?.elaborate?.practiceScore === 'number';
+    const isElaborateDone = Boolean(prog?.elaborate?.isCompleted || hasElaborateScore);
+    const elaborateScoreVal = typeof prog?.elaborate?.score === 'number'
+      ? prog.elaborate.score
+      : (typeof prog?.elaborate?.practiceScore === 'number' ? prog.elaborate.practiceScore : null);
+    
+    const explain: ActivityDetail = {
+      status: isElaborateDone ? 'completed' : (prog?.elaborate ? 'in_progress' : 'not_started'),
+      label: 'Luyện tập',
+      completedAt: isElaborateDone && prog?.updatedAt ? formatActiveDate(prog.updatedAt) : undefined,
+      score: elaborateScoreVal !== null ? `${elaborateScoreVal}/10` : (isElaborateDone ? 'Hoàn thành' : undefined)
+    };
+
+    // Activity 4: Vận dụng (Elaborate / Apply)
+    const isApplyDone = Boolean(prog?.apply?.isCompleted || prog?.apply?.isSubmitted || prog?.apply?.submittedQuestions);
+    const elaborate: ActivityDetail = {
+      status: isApplyDone ? 'completed' : (prog?.apply ? 'in_progress' : 'not_started'),
+      label: 'Vận dụng',
+      completedAt: isApplyDone && prog?.updatedAt ? formatActiveDate(prog.updatedAt) : undefined,
+      score: isApplyDone ? 'Đã nộp bài' : undefined
+    };
+
+    // Activity 5: Đánh giá (Evaluate / Assessment)
+    const hasAssessmentScore = typeof prog?.assessment?.testScore === 'number' || typeof prog?.assessment?.score === 'number';
+    const isAssessmentDone = Boolean(hasAssessmentScore || prog?.assessment?.isCompleted || prog?.assessment?.isSubmitted);
+    const assessmentScoreVal = typeof prog?.assessment?.testScore === 'number'
+      ? prog.assessment.testScore
+      : (typeof prog?.assessment?.score === 'number' ? prog.assessment.score : null);
+
+    const evaluate: ActivityDetail = {
+      status: isAssessmentDone ? 'completed' : (prog?.assessment ? 'in_progress' : 'not_started'),
+      label: 'Đánh giá',
+      completedAt: isAssessmentDone && prog?.updatedAt ? formatActiveDate(prog.updatedAt) : undefined,
+      score: assessmentScoreVal !== null ? `${assessmentScoreVal}/10` : (isAssessmentDone ? 'Hoàn thành' : undefined)
+    };
+
+    // Tiêu chuẩn kép đánh giá từ Single Source of Truth (lessonRatingService):
+    // 1. Điều kiện cần (Tiến độ): Hoàn thành đủ 100% cả 5 bước 5E (completedStepsCount === 5).
+    // 2. Điều kiện đủ (Chất lượng): Điểm tổng hợp câu hỏi tương tác đạt từ 8.0 - 10.0 (tỷ lệ đúng ≥ 80%).
+    const evaluation = evaluateStudentLessonRating(prog);
+    const completedStepsCount = evaluation.completedStepsCount;
+    const progressPct = evaluation.progressPct;
+    const avgQuizScore = evaluation.score10;
+    const rating = evaluation.rating;
+    const qualityLabel = evaluation.label;
+    const isQualityPass = evaluation.isQualityPass;
+    const isAtRisk = evaluation.isAtRisk;
+
+    // Calculate genuine "Nhận xét & Hoạt động gần nhất"
+    const activeDateStr = prog?.updatedAt ? formatActiveDate(prog.updatedAt) : (assignedDateStr || '');
+    let lastActiveText = '';
+
+    if (completedStepsCount === 5) {
+      if (avgQuizScore !== null && avgQuizScore < 5.0) {
+        lastActiveText = `Hoàn thành 5/5 nhưng điểm thấp (${avgQuizScore}/10) • Cần ôn tập${activeDateStr ? ` • ${activeDateStr}` : ''}`;
+      } else {
+        lastActiveText = `Hoàn thành 5/5 hoạt động${avgQuizScore !== null ? ` (${avgQuizScore}đ)` : ''}${activeDateStr ? ` • ${activeDateStr}` : ''}`;
+      }
+    } else if (completedStepsCount > 0 || prog) {
+      let currentAction = '';
+      if (evaluate.status === 'in_progress' || (isAssessmentDone && completedStepsCount < 5)) {
+        currentAction = isAssessmentDone ? 'Hoàn thành bài Đánh giá' : 'Đang làm bài Đánh giá';
+      } else if (elaborate.status === 'in_progress' || isApplyDone) {
+        currentAction = isApplyDone ? 'Hoàn thành bài Vận dụng' : 'Đang làm bài Vận dụng';
+      } else if (explain.status === 'in_progress' || isElaborateDone) {
+        currentAction = isElaborateDone ? 'Hoàn thành bài Luyện tập' : 'Đang làm bài Luyện tập';
+      } else if (explore.status === 'in_progress' || isExploreDone) {
+        currentAction = isExploreDone ? 'Hoàn thành video Khám phá' : 'Đang xem video Khám phá';
+      } else {
+        currentAction = 'Đã hoàn thành Khởi động';
+      }
+      lastActiveText = `${currentAction}${activeDateStr ? ` • ${activeDateStr}` : ''}`;
+    } else {
+      lastActiveText = 'Chưa vào học';
+    }
+
+    return {
+      studentId: st.sddcn || st.id,
+      stt: st.stt || idx + 1,
+      studentCode: resolvedDisplayCode,
+      studentName: st.name || st.fullName || `Học sinh ${idx + 1}`,
+      className: resolvedClassName,
+      avatar: st.avatar || '🐰',
+      engage,
+      explore,
+      explain,
+      elaborate,
+      evaluate,
+      progressPct,
+      avgQuizScore,
+      qualityLabel,
+      isQualityPass,
+      rating,
+      lastActiveText,
+      isAtRisk
+    };
+  });
+
+  // Ensure 100% unique students (no duplicate entries)
+  const uniqueStudentsMap = new Map<string, Student5EProgress>();
+  mappedStudents.forEach((st) => {
+    const key = (st.studentId || st.studentCode || `${st.className}-${st.stt}`).trim().toLowerCase();
+    if (!uniqueStudentsMap.has(key)) {
+      uniqueStudentsMap.set(key, st);
+    } else {
+      const existing = uniqueStudentsMap.get(key)!;
+      if (st.progressPct > existing.progressPct) {
+        uniqueStudentsMap.set(key, st);
+      }
+    }
+  });
+
+  const finalUniqueStudents = Array.from(uniqueStudentsMap.values()).map((s, idx) => ({
+    ...s,
+    stt: idx + 1
+  }));
+
+  return {
+    students: finalUniqueStudents,
+    targetClasses: uniqueTargetClasses,
+    assignedDateStr: assignedDateStr || (finalUniqueStudents.length > 0 ? '01/09/2026' : undefined)
+  };
+}
+
