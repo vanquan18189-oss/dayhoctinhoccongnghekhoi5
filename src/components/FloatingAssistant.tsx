@@ -15,6 +15,7 @@ interface FloatingAssistantProps {
 }
 
 export const FloatingAssistant: React.FC<FloatingAssistantProps> = ({ userRole }) => {
+  if (userRole === 'student') return null;
   const [isOpen, setIsOpen] = useState(false);
   const [inputPrompt, setInputPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);

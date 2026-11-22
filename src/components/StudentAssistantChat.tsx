@@ -12,6 +12,24 @@ interface ChatMessage {
 type SubjectCategory = 'all' | 'exercise' | 'math' | 'vietnamese' | 'it' | 'cheer';
 
 export const StudentAssistantChat: React.FC = () => {
+  const [isStudent, setIsStudent] = useState<boolean>(false);
+
+  useEffect(() => {
+    const checkRole = () => {
+      const role = typeof window !== 'undefined' ? localStorage.getItem('eduplay_user_role') : null;
+      setIsStudent(role === 'student');
+    };
+    checkRole();
+    window.addEventListener('storage', checkRole);
+    window.addEventListener('eduplay_student_session_updated', checkRole);
+    return () => {
+      window.removeEventListener('storage', checkRole);
+      window.removeEventListener('eduplay_student_session_updated', checkRole);
+    };
+  }, []);
+
+  if (isStudent) return null;
+
   const [isOpen, setIsOpen] = useState(false);
   const [inputPrompt, setInputPrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);

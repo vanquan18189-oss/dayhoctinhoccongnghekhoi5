@@ -169,12 +169,17 @@ export function getEffectiveStudentClassAndGrade(propClass?: string): {
 
   if (!cls && typeof window !== 'undefined') {
     try {
-      cls = (localStorage.getItem('eduplay_current_class') || localStorage.getItem('eduplay_active_class') || '').trim();
+      cls = (
+        localStorage.getItem('eduplay_current_class') || 
+        localStorage.getItem('eduplay_active_class') || 
+        localStorage.getItem('eduplay_current_student') || 
+        ''
+      ).trim();
     } catch {}
   }
 
   if (!cls) {
-    cls = 'Lớp 3D';
+    cls = '5C';
   }
 
   if (!cls.toLowerCase().startsWith('lớp') && !cls.toLowerCase().startsWith('khối')) {
@@ -182,8 +187,8 @@ export function getEffectiveStudentClassAndGrade(propClass?: string): {
   }
 
   const gradeMatch = cls.match(/\b([1-5])\b|lớp\s*([1-5])|khối\s*([1-5])/i);
-  const grNum = gradeMatch ? (gradeMatch[1] || gradeMatch[2] || gradeMatch[3]) : '';
-  const studentGrade = grNum ? `Khối ${grNum}` : 'Khối 3';
+  const grNum = gradeMatch ? (gradeMatch[1] || gradeMatch[2] || gradeMatch[3]) : '5';
+  const studentGrade = grNum ? `Khối ${grNum}` : 'Khối 5';
 
   const effectiveStudentCode = getAuthenticStudentCode(session, id, cls);
 

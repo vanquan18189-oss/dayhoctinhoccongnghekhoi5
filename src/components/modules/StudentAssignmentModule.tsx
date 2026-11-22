@@ -647,7 +647,7 @@ export const StudentAssignmentModule: React.FC<StudentAssignmentModuleProps> = (
   // Phân loại dữ liệu độc lập: loại trừ các bài giảng E-Learning, lọc theo lớp học và khử trùng lặp triệt để
   const todoAssignments = useMemo(() => {
     // 1. Loại trừ e-learning và lọc theo đúng lớp học sinh
-    const filtered = (liveAssignments || []).filter((as) => {
+    let filtered = (liveAssignments || []).filter((as) => {
       if (!as || !as.id) return false;
       const itemType = ((as as any).type || (as as any).category || (as as any).contentType || '').toLowerCase();
       if (itemType === 'elearning' || itemType === 'bai_giang' || itemType === 'lesson_5e' || as.id.startsWith('elearn-')) {
@@ -664,6 +664,16 @@ export const StudentAssignmentModule: React.FC<StudentAssignmentModuleProps> = (
       }
       return true;
     });
+
+    if (filtered.length === 0 && liveAssignments.length > 0 && !isPreviewMode) {
+      filtered = liveAssignments.filter(as => {
+        const itemType = ((as as any).type || (as as any).category || (as as any).contentType || '').toLowerCase();
+        if (itemType === 'elearning' || itemType === 'bai_giang' || itemType === 'lesson_5e' || as.id.startsWith('elearn-')) {
+          return false;
+        }
+        return true;
+      });
+    }
 
     // Sắp xếp bài tập ưu tiên bài khớp chính xác với lớp học sinh hoặc bài học sinh đã nộp
     const sortedFiltered = [...filtered].sort((a, b) => {
