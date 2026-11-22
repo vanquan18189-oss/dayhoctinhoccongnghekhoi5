@@ -33,13 +33,15 @@ import {
   getEffectiveStudentClassAndGrade,
   isTargetingStudent,
   getAuthenticStudentCode,
-  getCurrentStudentSession
+  getCurrentStudentSession,
+  normalizeClassKey
 } from '../../services/studentSessionService';
 import { studentResultService } from '../../services/studentResultService';
 import { getRecordType, isSameStudent, isValidStudentCode, normalizeStudentCode } from '../../services/studentCode';
 import {
   subscribeToAssignmentsFromFirestore,
   getAssignmentsFromFirestore,
+  getAssignmentsForStudentFromFirestore,
   getLocalCachedAssignments
 } from '../../services/assignmentStorageService';
 import { syncAssignmentQuestions } from '../../services/assignmentSyncService';
@@ -183,8 +185,8 @@ export const StudentAssignmentModule: React.FC<StudentAssignmentModuleProps> = (
 
   // Real-time synchronization: fetch fresh assignments from Firestore on mount & listen to window & Firestore events
   useEffect(() => {
-    // 1. Fetch fresh list from Firestore on mount
-    getAssignmentsFromFirestore().then(items => {
+    // 1. Fetch fresh list from Firestore on mount using student class/grade filter
+    getAssignmentsForStudentFromFirestore(studentClass, studentGrade).then(items => {
       if (Array.isArray(items) && items.length > 0) {
         setLiveAssignments(items);
       }
@@ -699,9 +701,10 @@ export const StudentAssignmentModule: React.FC<StudentAssignmentModuleProps> = (
         .replace(/^luyện tập:\s*/i, '')
         .replace(/\s+/g, ' ');
 
+      const classKey = normalizeClassKey(as.targetClass || as.grade || 'general');
       const rootId = as.originalAssignmentId || (as as any).groupId || as.id.replace(/-class-.*$/, '');
-      const semanticKey = `${cleanTitle}__${(as.subject || '').trim().toLowerCase()}__${(as.grade || '').trim().toLowerCase()}`;
-      const groupKey = rootId && rootId !== 'legacy' ? `root::${rootId}` : `semantic::${semanticKey}`;
+      const semanticKey = `${cleanTitle}__${(as.subject || '').trim().toLowerCase()}__${(as.grade || '').trim().toLowerCase()}__cls_${classKey}`;
+      const groupKey = rootId && rootId !== 'legacy' ? `root::${rootId}__cls_${classKey}` : `semantic::${semanticKey}`;
 
       if (!map.has(groupKey)) {
         map.set(groupKey, as);

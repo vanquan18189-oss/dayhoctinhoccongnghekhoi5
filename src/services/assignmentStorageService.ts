@@ -1,5 +1,5 @@
 import { db, auth } from './firebase';
-import { collection, doc, getDocs, getDoc, getDocFromServer } from 'firebase/firestore';
+import { collection, doc, getDocs, getDoc, getDocFromServer, query, where, limit } from 'firebase/firestore';
 import { ensureAnonymousGuestAuth } from './lessonStorageService';
 import { trackedSetDoc, trackedDeleteDoc, trackedWriteBatch, extractFirestoreErrorDetails } from './firestoreWriteTracker';
 import { HomeworkAssignment } from '../types';
@@ -7,6 +7,7 @@ import { removeUndefined, resolveCurrentTeacherProfile } from './teacherStorageS
 import { waitForWriteConfirmation, updateCollectionCacheStatus } from './firestoreWriteVerificationService';
 import { normalizeClassKey } from './studentStorageService';
 import { normalizeStudentCode } from './studentCode';
+import { isTargetingStudent, getEffectiveStudentClassAndGrade } from './studentSessionService';
 import { logSystemActivity } from './activityService';
 import { toISOStringUTC } from '../utils/dateUtils';
 import {
@@ -266,6 +267,77 @@ export async function getAssignmentsFromFirestore(forceRefresh = false): Promise
     return getLocalCachedAssignments();
   } catch (error) {
     console.warn("Lỗi đọc danh sách bài tập từ Firestore:", error);
+    return getLocalCachedAssignments();
+  }
+}
+
+/**
+ * Lọc chặt bài tập trên Firestore theo lớp và khối của học sinh (ví dụ: Lớp 5C, Khối 5) dùng where()
+ */
+export async function getAssignmentsForStudentFromFirestore(studentClassInput?: string, studentGradeInput?: string): Promise<HomeworkAssignment[]> {
+  try {
+    if (!db) return getLocalCachedAssignments();
+
+    const session = getEffectiveStudentClassAndGrade(studentClassInput);
+    const cls = (session.studentClass || '5C').trim();
+    const grd = (session.studentGrade || 'Khối 5').trim();
+    const gradeDigit = grd.replace(/\D/g, '') || '5';
+
+    const colRef = collection(db, 'assignments');
+    const classVariants = Array.from(new Set([
+      cls,
+      cls.toLowerCase(),
+      cls.toUpperCase(),
+      `Lớp ${cls}`,
+      `lớp ${cls}`,
+      `Lớp ${cls.toUpperCase()}`,
+      `Khối ${gradeDigit}`,
+      `khối ${gradeDigit}`,
+      `K${gradeDigit}`,
+      gradeDigit,
+      'All',
+      'all',
+      'Tất cả',
+      'tất cả',
+      'Toàn khối'
+    ]));
+
+    const queries = [];
+    for (let i = 0; i < classVariants.length; i += 10) {
+      const chunk = classVariants.slice(i, i + 10);
+      queries.push(getDocs(query(colRef, where('targetClass', 'in', chunk), limit(40))));
+      queries.push(getDocs(query(colRef, where('grade', 'in', chunk), limit(40))));
+    }
+    queries.push(getDocs(query(colRef, limit(60))));
+
+    const results = await Promise.allSettled(queries);
+    const mergedMap = new Map<string, HomeworkAssignment>();
+
+    results.forEach(res => {
+      if (res.status === 'fulfilled') {
+        res.value.forEach(docSnap => {
+          const raw = { id: docSnap.id, ...(docSnap.data() as any) } as HomeworkAssignment;
+          if (isTargetingStudent(raw.targetClass, raw.grade, cls, grd, {
+            targetClasses: (raw as any).targetClasses,
+            classId: (raw as any).classId,
+            classes: (raw as any).classes,
+            assignedClasses: (raw as any).assignedClasses
+          })) {
+            mergedMap.set(docSnap.id, raw);
+          }
+        });
+      }
+    });
+
+    const items = Array.from(mergedMap.values());
+    const clean = deduplicateAssignments(items);
+    if (clean.length > 0) {
+      saveAssignmentsToLocalStorage(clean);
+      return clean;
+    }
+    return getLocalCachedAssignments();
+  } catch (err) {
+    console.warn('Lỗi query Firestore theo lớp học sinh:', err);
     return getLocalCachedAssignments();
   }
 }

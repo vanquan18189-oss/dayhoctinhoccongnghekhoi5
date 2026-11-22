@@ -82,9 +82,8 @@ export function deduplicateAndNormalizeStudents(
     if (!st || typeof st !== 'object') return;
     
     const rawId = (st.id || '').trim();
-    const rawCode = (st.code || st.username || '').trim().toLowerCase();
+    const rawCode = (st.code || st.studentCode || st.username || '').trim().toLowerCase();
 
-    // If duplicate raw ID or code exists in the incoming array, skip duplicate row
     if (rawId && seenIds.has(rawId)) {
       return;
     }
@@ -99,16 +98,20 @@ export function deduplicateAndNormalizeStudents(
 
   const finalSeenIds = new Set<string>();
   return uniqueStudents.map((st, idx) => {
-    const stt = idx + 1;
-    const validFullCode = formatStandardStudentCode(st.code);
-    const code = validFullCode || (st.code ? normalizeStudentCode(st.code) : `${key}26-27-${stt}`);
+    const stt = st.stt || (idx + 1);
+    const validFullCode = formatStandardStudentCode(st.code || st.studentCode || st.username);
+    const code = validFullCode || (st.code || st.studentCode || st.username ? normalizeStudentCode(String(st.code || st.studentCode || st.username)) : `${key}26-27-${stt}`);
     
-    // Ensure every record has a unique ID and no collisions
     let id = st.id && !finalSeenIds.has(st.id) ? st.id : `st-${key}-${stt}`;
     if (finalSeenIds.has(id)) {
       id = `st-${key}-${stt}-${idx + 1}`;
     }
     finalSeenIds.add(id);
+
+    const rawFullName = (st.fullName || st.name || '').trim();
+    const rawName = (st.name || st.fullName || '').trim();
+    const finalFullName = rawFullName || rawName || `Học sinh ${stt}`;
+    const finalName = rawName || rawFullName || finalFullName;
 
     const sddcn = (st.sddcn && st.sddcn.trim().length > 0) 
       ? st.sddcn.trim() 
@@ -121,6 +124,9 @@ export function deduplicateAndNormalizeStudents(
       id,
       stt,
       code,
+      studentCode: code,
+      fullName: finalFullName,
+      name: finalName,
       sddcn,
       studentPersistentId: sddcn,
       academicYear: st.academicYear || '2026-2027',
@@ -975,26 +981,58 @@ export async function fetchClassStudentsFromFirestore(className: string): Promis
   try {
     if (!db) return null;
 
+    const stdName = getStandardClassName(className);
     const classKey = normalizeClassKey(className);
-    let rosterRef = doc(db, 'class_rosters', classKey);
-    let docSnap = await getDoc(rosterRef);
+    const variants = Array.from(new Set([
+      className,
+      stdName,
+      classKey,
+      classKey.toLowerCase(),
+      `Lớp ${classKey}`,
+      `lớp ${classKey}`,
+      `Lớp ${className}`
+    ]));
 
-    if (!docSnap.exists() && classKey !== classKey.toLowerCase()) {
-      rosterRef = doc(db, 'class_rosters', classKey.toLowerCase());
-      docSnap = await getDoc(rosterRef);
-    }
+    let foundStudents: StudentRecord[] = [];
 
-    if (docSnap.exists()) {
-      const data = docSnap.data();
-      if (Array.isArray(data?.students) && data.students.length > 0) {
-        const cleaned = deduplicateAndNormalizeStudents(data.students as StudentRecord[], className);
-        // Cache to LocalStorage immediately
-        saveStudentsToLocalStorage(className, cleaned);
-        return cleaned;
+    for (const v of variants) {
+      const rosterRef = doc(db, 'class_rosters', v);
+      const docSnap = await getDoc(rosterRef);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const studentList = Array.isArray(data?.students)
+          ? data.students
+          : (Array.isArray(data?.studentList) ? data.studentList : (Array.isArray(data?.roster) ? data.roster : []));
+        if (Array.isArray(studentList) && studentList.length > 0) {
+          foundStudents = studentList as StudentRecord[];
+          break;
+        }
       }
     }
+
+    if (foundStudents.length === 0) {
+      try {
+        const studentsRef = collection(db, 'students');
+        for (const v of variants) {
+          const q = query(studentsRef, where('className', '==', v));
+          const snap = await getDocs(q);
+          if (!snap.empty) {
+            snap.forEach(d => {
+              foundStudents.push({ id: d.id, ...(d.data() as any) });
+            });
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    if (foundStudents.length > 0) {
+      const cleaned = deduplicateAndNormalizeStudents(foundStudents, stdName);
+      saveStudentsToLocalStorage(stdName, cleaned);
+      return cleaned;
+    }
   } catch (err) {
-    console.warn('Không thể đọc dữ liệu học sinh từ Firestore (sử dụng offline cache):', err);
+    console.warn('Không thể đọc dữ liệu học sinh từ Firestore:', err);
   }
 
   return null;

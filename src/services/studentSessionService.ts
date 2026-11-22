@@ -250,8 +250,17 @@ export function isTargetingStudent(
   const validCandidates = candidates.filter(Boolean);
 
   // Extract numeric digits for grade comparison (e.g. "Khối 3" -> "3", "3D" -> "3")
-  const targetGradeDigit = (targetGrade || '').replace(/\D/g, '');
+  const targetGradeDigit = (targetGrade || '').replace(/\D/g, '') || ((typeof targetClass === 'string' && targetClass.includes('Khối')) ? targetClass.replace(/\D/g, '') : '');
   const currentGradeDigit = (resolvedGrd || '').replace(/\D/g, '') || (resolvedCls || '').replace(/\D/g, '').slice(0, 1);
+
+  if (targetGradeDigit && currentGradeDigit && targetGradeDigit !== currentGradeDigit) {
+    const isGlobal = validCandidates.some(c => {
+      const l = c.toLowerCase();
+      return l === 'all' || l.includes('tất cả') || l.includes('tat ca') || l.includes('toàn trường');
+    });
+    if (!isGlobal) return false;
+  }
+
   const isSameGrade = targetGradeDigit && currentGradeDigit
     ? targetGradeDigit === currentGradeDigit
     : (!targetGrade || !resolvedGrd || targetGrade?.trim().toLowerCase() === resolvedGrd?.trim().toLowerCase());

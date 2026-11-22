@@ -352,6 +352,7 @@ export interface StudentRecord {
   id: string;
   stt: number;
   code: string; // Mã HS theo lớp/năm học (ví dụ "3c1", "5c2") - dùng để hiển thị và gọi tên
+  studentCode?: string;
   sddcn: string; // Số định danh cá nhân (Persistent key không đổi qua các năm học)
   studentPersistentId?: string; // Khóa định danh bất biến (đồng nhất với sddcn)
   academicYear?: string; // Niên khóa / Năm học (ví dụ "2026-2027")
